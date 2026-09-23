@@ -1,0 +1,15 @@
+{
+  "format": "rwf.preset",
+  "version": 1,
+  "name": "Вертолёт: НАР + Вихрь",
+  "variant": "attack_heli",
+  "altitude": 70.0,
+  "is_bot": false,
+  "ai": "heli",
+  "loadout": {
+    "0": "s8",
+    "1": "s8",
+    "2": "vikhr",
+    "3": "vikhr"
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "format": "bomber.route",
+  "version": 1,
+  "name": "Разведка по квадрату",
+  "loop": true,
+  "owner_kind": "player",
+  "waypoints": [
+    {
+      "x": -200.0,
+      "z": -200.0,
+      "altitude": 120.0,
+      "action": "recon",
+      "count": 1,
+      "duration": 8.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "разведка NW"
+    },
+    {
+      "x": 200.0,
+      "z": -200.0,
+      "altitude": 120.0,
+      "action": "recon",
+      "count": 1,
+      "duration": 8.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "разведка NE"
+    },
+    {
+      "x": 200.0,
+      "z": 200.0,
+      "altitude": 120.0,
+      "action": "strafe",
+      "count": 2,
+      "duration": 4.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "обстрел SE"
+    },
+    {
+      "x": -200.0,
+      "z": 200.0,
+      "altitude": 120.0,
+      "action": "navigate",
+      "count": 1,
+      "duration": 3.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "замыкание круга"
+    }
+  ]
+}

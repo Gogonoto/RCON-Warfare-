@@ -1,0 +1,13 @@
+{
+  "format": "rwf.preset",
+  "version": 1,
+  "name": "БПЛА: разведка + ПТУР",
+  "variant": "recon_drone",
+  "altitude": 140.0,
+  "is_bot": false,
+  "ai": "recon",
+  "loadout": {
+    "0": "fab100",
+    "2": "vikhr"
+  }
+}

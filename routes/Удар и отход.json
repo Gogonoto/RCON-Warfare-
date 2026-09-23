@@ -1,0 +1,65 @@
+{
+  "format": "bomber.route",
+  "version": 1,
+  "name": "Удар и отход",
+  "loop": false,
+  "owner_kind": "player",
+  "waypoints": [
+    {
+      "x": 0.0,
+      "z": -200.0,
+      "altitude": 160.0,
+      "action": "navigate",
+      "count": 1,
+      "duration": 3.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "рубеж захода"
+    },
+    {
+      "x": 0.0,
+      "z": 0.0,
+      "altitude": 90.0,
+      "action": "bomb",
+      "count": 2,
+      "duration": 3.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "сброс по цели"
+    },
+    {
+      "x": 0.0,
+      "z": 260.0,
+      "altitude": 210.0,
+      "action": "navigate",
+      "count": 1,
+      "duration": 3.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "отход"
+    },
+    {
+      "x": -300.0,
+      "z": 260.0,
+      "altitude": 180.0,
+      "action": "hold",
+      "count": 1,
+      "duration": 10.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "сбор после удара"
+    }
+  ]
+}

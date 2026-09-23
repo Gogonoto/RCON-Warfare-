@@ -1,0 +1,12 @@
+{
+  "format": "rwf.preset",
+  "version": 1,
+  "name": "БМП-3: сопровождение колонн",
+  "variant": "ifv",
+  "altitude": 0.0,
+  "is_bot": false,
+  "ai": "",
+  "loadout": {
+    "1": "kornet"
+  }
+}

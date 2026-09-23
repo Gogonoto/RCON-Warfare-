@@ -1,0 +1,65 @@
+{
+  "format": "bomber.route",
+  "version": 1,
+  "name": "Вертолёт: висение и ПТУР",
+  "loop": false,
+  "owner_kind": "player",
+  "waypoints": [
+    {
+      "x": 0.0,
+      "z": -80.0,
+      "altitude": 60.0,
+      "action": "navigate",
+      "count": 1,
+      "duration": 3.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "precise",
+      "radius": 8.0,
+      "speed": null,
+      "note": "подход"
+    },
+    {
+      "x": 0.0,
+      "z": 0.0,
+      "altitude": 40.0,
+      "action": "hold",
+      "count": 1,
+      "duration": 6.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "precise",
+      "radius": 0.0,
+      "speed": null,
+      "note": "висение над целью"
+    },
+    {
+      "x": 0.0,
+      "z": 0.0,
+      "altitude": 40.0,
+      "action": "missile",
+      "count": 2,
+      "duration": 3.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "auto",
+      "radius": 0.0,
+      "speed": null,
+      "note": "пуск ПТУР"
+    },
+    {
+      "x": 0.0,
+      "z": -120.0,
+      "altitude": 80.0,
+      "action": "navigate",
+      "count": 1,
+      "duration": 3.0,
+      "target_name": "",
+      "target_altitude": null,
+      "pass_mode": "precise",
+      "radius": 0.0,
+      "speed": null,
+      "note": "отход"
+    }
+  ]
+}

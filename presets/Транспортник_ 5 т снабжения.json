@@ -1,0 +1,10 @@
+{
+  "format": "rwf.preset",
+  "version": 1,
+  "name": "Транспортник: 5 т снабжения",
+  "variant": "transport",
+  "altitude": 160.0,
+  "is_bot": false,
+  "ai": "",
+  "loadout": {}
+}

@@ -1,0 +1,15 @@
+{
+  "format": "rwf.preset",
+  "version": 1,
+  "name": "Штурмовик: бомбы + НАР",
+  "variant": "attacker",
+  "altitude": 180.0,
+  "is_bot": false,
+  "ai": "strike",
+  "loadout": {
+    "0": "fab500",
+    "1": "s8",
+    "2": "s8",
+    "3": "agm"
+  }
+}

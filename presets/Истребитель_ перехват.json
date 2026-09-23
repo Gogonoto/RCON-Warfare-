@@ -1,0 +1,15 @@
+{
+  "format": "rwf.preset",
+  "version": 1,
+  "name": "Истребитель: перехват",
+  "variant": "fighter",
+  "altitude": 260.0,
+  "is_bot": false,
+  "ai": "fighter",
+  "loadout": {
+    "0": "r73",
+    "1": "r73",
+    "2": "r27",
+    "3": "r27"
+  }
+}
