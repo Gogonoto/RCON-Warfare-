@@ -29,7 +29,7 @@ from .config import AppConfig
 from .ai import BaseAI
 from .bases import (CARRIER_DECK_Y, KIND_CARRIER, SUPPLY_PER_TON,
                     BaseManager, RecoveryNode, forward_vec, right_vec)
-from .combat import CombatSystem
+from .combat import CombatSystem, blast_falloff
 from .missiles import MissileManager
 from .events import (EventBus, TOPIC_UNIT_ADDED, TOPIC_UNIT_REMOVED,
                      TOPIC_UNIT_UPDATED, TOPIC_WEAPON_FIRED)
@@ -576,7 +576,7 @@ class UnitEngine:
             d = max(0.0, base.distance_to(pos[0], pos[2]) - base.radius * 0.5)
             if d > radius:
                 continue
-            falloff = max(0.3, 1.0 - (d / radius) * 0.7)
+            falloff = blast_falloff(d, radius, floor=0.30, slope=0.70)   # P1.2: единая формула, базовые дефолты
             if base.take_damage(damage * falloff, source):
                 destroyed.append(base.id)
                 self._on_base_destroyed(base, source)
