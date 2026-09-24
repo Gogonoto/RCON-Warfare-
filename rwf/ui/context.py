@@ -19,7 +19,7 @@ from . import state as st
 from . import theme as T
 
 CTX_W = 208
-CTX_ITEMS = 14
+CTX_ITEMS = 20
 
 Item = Tuple[str, Optional[Callable[[], None]]]
 
@@ -108,7 +108,8 @@ class ContextMenu:
 
     # ------------------------------------------------------------- наполнение
     def items_for(self, uid: Optional[int], base_id: Optional[int],
-                  player: Optional[str], wx: float, wz: float) -> List[Item]:
+                  player: Optional[str], wx: float, wz: float,
+                  target: Optional[Dict[str, Any]] = None) -> List[Item]:
         state, facade = self.state, self.facade
         items: List[Item] = []
         if uid is not None:
@@ -134,6 +135,23 @@ class ContextMenu:
                 ("Снять с карты",
                  lambda: facade.send("despawn", uid, False)),
             ]
+            # TAC-01 (п.17 ТЗ): тип удара по засечённой цели — прямо из
+            # контекстного меню юнита; смена немедленно переназначает маршрут.
+            tgt = target or (state.get("tac_targets") or {}).get(int(uid))
+            if tgt:
+                items.append(("-", None))
+                tname = str(tgt.get("name") or tgt.get("kind") or "цель")
+                for strike, label in (("auto", "Авто"),
+                                      ("missile", "Ракета"),
+                                      ("bomb", "Бомбы"),
+                                      ("strafe", "Обстрел"),
+                                      ("kamikaze", "Камикадзе"),
+                                      ("navigate", "Просто долететь")):
+                    items.append((f"Удар по «{tname}»: {label}",
+                                  lambda s=strike, u=uid:
+                                  facade.send("tac_set_strike", u, s)))
+                items.append(("Снять цель",
+                              lambda: facade.send("tac_clear_target", uid)))
         elif base_id is not None:
             base = next((b for b in state.get("bases") or []
                          if b["id"] == base_id), None)

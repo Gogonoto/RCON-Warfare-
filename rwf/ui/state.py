@@ -71,6 +71,16 @@ def make_state() -> Dict[str, Any]:
                                           # ("base", id) — объект пульта
         "planner": {"points": [],       # [{x,z,alt,action}]
                     "selected": None},
+        # --- тактическое управление (TAC-01, пункт 17 ТЗ) ------------------
+        # selected_units: множественное выделение юнитов; unit_routes:
+        # uid -> черновой маршрут [{x,z}] (ещё не назначенный движку);
+        # tac_drag: активный перетаскиватель {"kind": unit|point|new,
+        # "uid", "index", "from_index"}; tac_targets: засечённые цели по
+        # uid: {"kind": player|base|unit|ground, "name", "x", "z"}.
+        "selected_units": [],
+        "unit_routes": {},
+        "tac_drag": None,
+        "tac_targets": {},
         "launch": {"base_id": None, "variant": "attacker", "altitude": 150.0,
                    "is_bot": False, "loadout": {}},
         "layers": {"grid": True, "bases": True, "zones": True, "routes": True,
@@ -223,3 +233,87 @@ def planner_drag(state: Dict[str, Any], index: int, x: float, z: float) -> None:
     if 0 <= index < len(pts):
         pts[index]["x"] = float(x)
         pts[index]["z"] = float(z)
+
+
+# ---------------------------------------------------------------------------
+#  Тактическое управление (TAC-01, пункт 17 ТЗ)
+#  Черновые маршруты выделенной техники живут в STATE; facade превращает их
+#  в реальные маршруты движка (route_order). Все мутации — только из
+#  колбэков DPG главного потока (I1/I4).
+# ---------------------------------------------------------------------------
+def tac_select(state: Dict[str, Any], uid: Optional[int],
+               additive: bool = False) -> None:
+    """Клик по юниту: одиночный выбор либо +Shift/Ctrl к множественному."""
+    sel: List[int] = state["selected_units"]
+    if uid is None:
+        if not additive:
+            state["selected_units"] = []
+            state["selection"] = None
+        return
+    if additive:
+        if uid in sel:
+            sel.remove(uid)
+        else:
+            sel.append(uid)
+    else:
+        state["selected_units"] = [uid]
+        state["selection"] = uid
+        return
+    state["selection"] = sel[-1] if sel else None
+
+
+def tac_unit_route(state: Dict[str, Any], uid: int) -> List[Dict[str, float]]:
+    """Черновой маршрут юнита (создаётся при первом обращении)."""
+    routes: Dict[int, List[Dict[str, float]]] = state["unit_routes"]
+    return routes.setdefault(uid, [])
+
+
+def tac_add_point(state: Dict[str, Any], uid: int, x: float, z: float,
+                  after: Optional[int] = None) -> None:
+    """Добавить точку маршрута (after=None — в конец, иначе вставить после)."""
+    pts = tac_unit_route(state, uid)
+    p = {"x": float(x), "z": float(z)}
+    if after is None or after >= len(pts) - 1:
+        pts.append(p)
+    else:
+        pts.insert(after + 1, p)
+
+
+def tac_move_point(state: Dict[str, Any], uid: int, index: int,
+                   x: float, z: float) -> None:
+    pts = tac_unit_route(state, uid)
+    if 0 <= index < len(pts):
+        pts[index]["x"] = float(x)
+        pts[index]["z"] = float(z)
+
+
+def tac_remove_point(state: Dict[str, Any], uid: int, index: int) -> None:
+    pts = state["unit_routes"].get(uid) or []
+    if 0 <= index < len(pts):
+        pts.pop(index)
+        if not pts:
+            state["unit_routes"].pop(uid, None)
+
+
+def tac_clear_routes(state: Dict[str, Any]) -> None:
+    """Сброс всех черновиков (после отправки назначенных маршрутов)."""
+    state["unit_routes"] = {}
+
+
+def tac_clear_route_points(state: Dict[str, Any], uid: int) -> None:
+    """Очистить черновой маршрут одного юнита после назначения движку.
+
+    Запись удаляется целиком — иначе в слое ``unit_routes`` копятся
+    пустые списки на каждый юнит.
+    """
+    routes: Dict[int, List[Dict[str, float]]] = state.get("unit_routes") or {}
+    routes.pop(int(uid), None)
+
+
+def tac_set_target(state: Dict[str, Any], uid: int,
+                   target: Optional[Dict[str, Any]]) -> None:
+    """Цель атаки для юнита: dict(kind,name,x,z) или None (снять)."""
+    if target is None:
+        state["tac_targets"].pop(uid, None)
+    else:
+        state["tac_targets"][int(uid)] = dict(target)

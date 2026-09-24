@@ -1,5 +1,4 @@
 __pycache__/
-*.py[cod]
-.venv/
-bomber.json
-*.log
+*.pyc
+**/__pycache__/
+*.pyc

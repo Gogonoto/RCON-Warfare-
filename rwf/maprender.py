@@ -212,26 +212,90 @@ class TerrainRaster:
             return None
 
         y0, y1 = y_range
-        buf = bytearray(w * h * 3)
-        for i in range(0, len(buf), 3):
-            buf[i:i + 3] = bytes(UNKNOWN_TILE)
-        for iy, bz in enumerate(zs):
-            row = iy * w * 3
-            for ix, bx in enumerate(xs):
-                tile = getter((bx, bz))
-                if tile is None:
-                    tile = (getter((bx + sx_step, bz)) or getter((bx - sx_step, bz))
-                            or getter((bx, bz + sx_step)) or getter((bx, bz - sx_step)))
+        # Основная ветка — numpy: весь растр собирается векторно за миллисекунды.
+        # Без numpy остаётся медленный чистый Python (корректность та же).
+        try:
+            import numpy as np
+        except ImportError:  # pragma: no cover - окружение без numpy
+            np = None  # type: ignore[assignment]
+
+        if np is not None:
+            img = np.full((h, w, 3), UNKNOWN_TILE, dtype=np.uint8)
+            xs_a = np.asarray(xs)
+            zs_a = np.asarray(zs)
+            Y = np.zeros((h, w), dtype=np.float64)
+            KIDX = np.zeros((h, w), dtype=np.int16)   # 0 = нет тайла
+            kinds_list = list(BLOCK_PALETTE.keys())
+            kidx = {k: i + 1 for i, k in enumerate(kinds_list)}
+            other_i = kidx["other"]
+            tiles = grid if isinstance(grid, dict) else None
+            if tiles is not None:
+                td = tiles.get("tiles") or {}
+                items = np.fromiter(
+                    td.items(),
+                    dtype=np.dtype([("key", [("x", "<i8"), ("z", "<i8")]),
+                                    ("val", [("y", "<f8"), ("kind", "<i8")])]),
+                    count=len(td))
+                tx = items["key"]["x"] // sx_step
+                tz = items["key"]["z"] // sx_step
+                vx = np.searchsorted(xs_a, tx)
+                vz = np.searchsorted(zs_a, tz)
+                ok = ((vx < w) & (vz < h) & (vx >= 0) & (vz >= 0)
+                      & (xs_a[np.clip(vx, 0, max(w - 1, 0))] == tx * sx_step)
+                      & (zs_a[np.clip(vz, 0, max(h - 1, 0))] == tz * sx_step))
+                yy = items["val"]["y"]
+                kk = np.array([kidx.get(str(k), other_i)
+                               for k in items["val"]["kind"]], dtype=np.int16)
+                Y[vz[ok], vx[ok]] = yy[ok]
+                KIDX[vz[ok], vx[ok]] = kk[ok]
+            else:
+                for iy, bz in enumerate(zs):
+                    for ix, bx in enumerate(xs):
+                        tile = getter((bx, bz))
+                        if tile is None:
+                            tile = (getter((bx + sx_step, bz))
+                                    or getter((bx - sx_step, bz))
+                                    or getter((bx, bz + sx_step))
+                                    or getter((bx, bz - sx_step)))
+                            if tile is None:
+                                continue
+                        y, kind = tile
+                        Y[iy, ix] = y
+                        KIDX[iy, ix] = kidx.get(kind, other_i)
+            span = max(1.0, float(y1) - float(y0))
+            t = np.clip((Y - float(y0)) / span, 0.0, 1.0)
+            f = (0.55 + 0.55 * t)[..., None]
+            pal = np.array([BLOCK_PALETTE[k] for k in kinds_list],
+                           dtype=np.float64)
+            rgb = np.clip(pal[KIDX - 1] * f, 0, 255).astype(np.uint8)
+            have = KIDX > 0
+            img[have] = rgb[have]
+            out_bytes = img.tobytes()
+        else:
+            buf = bytearray(w * h * 3)
+            for i in range(0, len(buf), 3):
+                buf[i:i + 3] = bytes(UNKNOWN_TILE)
+            for iy, bz in enumerate(zs):
+                row = iy * w * 3
+                for ix, bx in enumerate(xs):
+                    tile = getter((bx, bz))
                     if tile is None:
-                        continue
-                y, kind = tile
-                rgb = shade(BLOCK_PALETTE.get(kind, BLOCK_PALETTE["other"]), y, y0, y1)
-                off = row + ix * 3
-                buf[off], buf[off + 1], buf[off + 2] = rgb
+                        tile = (getter((bx + sx_step, bz))
+                                or getter((bx - sx_step, bz))
+                                or getter((bx, bz + sx_step))
+                                or getter((bx, bz - sx_step)))
+                        if tile is None:
+                            continue
+                    y, kind = tile
+                    rgb = shade(BLOCK_PALETTE.get(kind, BLOCK_PALETTE["other"]),
+                                y, y0, y1)
+                    off = row + ix * 3
+                    buf[off], buf[off + 1], buf[off + 2] = rgb
+            out_bytes = bytes(buf)
 
         half = sx_step * 0.5
         world = (x0 - half, z0 - half, x1 + half, z1 + half)
-        self._cache = (bytes(buf), w, h, world)
+        self._cache = (out_bytes, w, h, world)
         self._cache_key = key
         return self._cache
 
@@ -871,6 +935,104 @@ class PlannerLayer(Layer):
         return prims
 
 
+class TacLayer(Layer):
+    """Черновики тактических маршрутов выделенной техники (TAC-01, п.17 ТЗ).
+
+    Рисует незавершённые маршруты из STATE (`unit_routes`), засечённые цели
+    (`tac_targets`) и активный перетаскиватель (`tac_drag`) — поверх реальных
+    маршрутов движка, в акцентном цвете оператора.
+    """
+    z = 68
+    COLOR = "#4de6ff"          # черновой маршрут
+    TARGET_COLOR = "#ff5566"   # засечённая цель
+
+    def __init__(self):
+        self.routes: Dict[int, List[Dict[str, float]]] = {}
+        self.targets: Dict[int, Dict[str, Any]] = {}
+        self.drag: Optional[Dict[str, Any]] = None
+        self.selected: List[int] = []
+        self.units: Dict[int, Any] = {}
+
+    def render(self, snap, tf):
+        prims: List[Dict[str, Any]] = []
+        for uid, pts in (self.routes or {}).items():
+            if not pts:
+                continue
+            unit = (self.units or {}).get(uid)
+            start = tf.to_screen(unit["pos"][0], unit["pos"][2]) \
+                if unit else None
+            prev = start
+            for i, p in enumerate(pts):
+                sx, sy = tf.to_screen(p["x"], p["z"])
+                if prev is not None:
+                    prims.append({"type": "line", "x1": prev[0], "y1": prev[1],
+                                  "x2": sx, "y2": sy, "color": self.COLOR,
+                                  "width": 2.0, "dash": True, "alpha": 230})
+                r = 6.5 if i < len(pts) - 1 else 8.0
+                prims.append({"type": "poly", "closed": True,
+                              "points": [(sx, sy - r), (sx + r, sy),
+                                         (sx, sy + r), (sx - r, sy)],
+                              "fill": "#0c130c", "outline": self.COLOR,
+                              "width": 2.0})
+                prims.append({"type": "text", "x": sx, "y": sy,
+                              "text": str(i + 1), "color": "#ffffff",
+                              "anchor": "center", "size": 8})
+                prev = (sx, sy)
+        # активное перетаскивание: «новая точка» / линия от точки к курсору
+        drag = self.drag
+        if drag and drag.get("kind") in ("point", "new"):
+            pts = (self.routes or {}).get(drag.get("uid")) or []
+            idx = int(drag.get("index", len(pts)))
+            anchor = None
+            if 0 <= idx < len(pts):
+                anchor = tf.to_screen(pts[idx]["x"], pts[idx]["z"])
+            elif drag.get("from_index") is not None \
+                    and 0 <= int(drag["from_index"]) < len(pts):
+                anchor = tf.to_screen(pts[int(drag["from_index"])]["x"],
+                                      pts[int(drag["from_index"])]["z"])
+            elif drag.get("kind") == "new":
+                # тянем от последней точки; если точек нет — от юнита
+                if pts:
+                    anchor = tf.to_screen(pts[-1]["x"], pts[-1]["z"])
+                else:
+                    u = (self.units or {}).get(drag.get("uid"))
+                    if u:
+                        anchor = tf.to_screen(u["pos"][0], u["pos"][2])
+            cur = drag.get("cursor")
+            if anchor is not None and cur is not None:
+                cx, cy = tf.to_screen(cur[0], cur[1])
+                prims.append({"type": "line", "x1": anchor[0], "y1": anchor[1],
+                              "x2": cx, "y2": cy, "color": self.COLOR,
+                              "width": 2.0, "dash": True, "alpha": 160})
+                prims.append({"type": "circle", "x": cx, "y": cy, "r": 7,
+                              "outline": self.COLOR, "width": 2.0,
+                              "alpha": 220})
+        # засечённые цели: прицел + подпись, линия от юнита
+        for uid, tgt in (self.targets or {}).items():
+            tx, tz = float(tgt.get("x", 0.0)), float(tgt.get("z", 0.0))
+            sx, sy = tf.to_screen(tx, tz)
+            unit = (self.units or {}).get(uid)
+            if unit:
+                ux, uy = tf.to_screen(unit["pos"][0], unit["pos"][2])
+                prims.append({"type": "line", "x1": ux, "y1": uy,
+                              "x2": sx, "y2": sy, "color": self.TARGET_COLOR,
+                              "width": 1.6, "dash": True, "alpha": 200})
+            ring = 12.0
+            prims.append({"type": "circle", "x": sx, "y": sy, "r": ring,
+                          "outline": self.TARGET_COLOR, "width": 2.0})
+            for dx_, dy_ in ((ring + 5, 0), (-ring - 5, 0),
+                             (0, ring + 5), (0, -ring - 5)):
+                prims.append({"type": "line", "x1": sx + dx_ * 0.55,
+                              "y1": sy + dy_ * 0.55, "x2": sx + dx_,
+                              "y2": sy + dy_, "color": self.TARGET_COLOR,
+                              "width": 2.0})
+            name = str(tgt.get("name") or tgt.get("kind") or "цель")
+            prims.append({"type": "text", "x": sx, "y": sy + ring + 6,
+                          "text": f"⌖ {name}", "color": self.TARGET_COLOR,
+                          "anchor": "center", "size": 9})
+        return prims
+
+
 class HudLayer(Layer):
     """HUD: виньетка по кромке, рамка с уголками, компас с рисками и
     стрелкой севера, контрастная масштабная линейка, служебная строка."""
@@ -1004,19 +1166,20 @@ class MapRenderer:
         self.raster = TerrainRaster(raster_size)
         self.terrain_layer_enabled = True
         self.planner = PlannerLayer()
+        self.tac = TacLayer()
         self.units_layer = UnitsLayer()
         self.base_layer = BaseLayer()
         self.layers: List[Layer] = [
             GridLayer(), self.base_layer, ZonesLayer(), RouteLayer(),
             MarkersLayer(), self.units_layer, PlayersLayer(), self.planner,
-            HudLayer(),
+            self.tac, HudLayer(),
         ]
         self._by_name: Dict[str, Layer] = {
             "grid": self.layers[0], "bases": self.layers[1],
             "zones": self.layers[2], "routes": self.layers[3],
             "markers": self.layers[4], "units": self.layers[5],
             "players": self.layers[6], "planner": self.planner,
-            "hud": self.layers[8],
+            "tac": self.tac, "hud": self.layers[9],
         }
         self.planner.set_colors({})
 
@@ -1052,20 +1215,44 @@ class MapRenderer:
             self.transform.set_center(target[0], target[2], keep_follow=True)
 
     # -------------------------------------------------------------- кадр
-    def render(self, snap: Dict[str, Any],
-               terrain: Optional[Dict[str, Any]] = None,
-               follow_uid: Optional[int] = None) -> List[Dict[str, Any]]:
-        self.follow_unit(snap, follow_uid)
-        tf = self.transform
+    #: слои, которые пересчитываются только при изменении камеры/содержимого
+    #: (дорогие: сетка ~тысячи линий, базы с детализацией). Юниты/игроки/HUD
+    #: всегда рендерятся заново — они дёшевы и живые (FPS-01).
+    BG_LAYERS = ("grid", "bases", "zones", "routes", "markers")
+
+    def render_bg(self, snap: Dict[str, Any]) -> List[Dict[str, Any]]:
         prims: List[Dict[str, Any]] = []
-        for layer in sorted(self.layers, key=lambda l: l.z):
-            if not layer.enabled:
+        tf = self.transform
+        for name in self.BG_LAYERS:
+            layer = self._by_name.get(name)
+            if layer is None or not layer.enabled:
                 continue
             try:
                 prims.extend(layer.render(snap, tf))
             except Exception:  # noqa: BLE001 - слой не должен ронять карту
                 continue
         return prims
+
+    def render_fg(self, snap: Dict[str, Any]) -> List[Dict[str, Any]]:
+        prims: List[Dict[str, Any]] = []
+        tf = self.transform
+        bg = set(self.BG_LAYERS)
+        for layer in sorted(self.layers, key=lambda l: l.z):
+            if not layer.enabled:
+                continue
+            if any(layer is self._by_name[n] for n in bg if n in self._by_name):
+                continue
+            try:
+                prims.extend(layer.render(snap, tf))
+            except Exception:  # noqa: BLE001
+                continue
+        return prims
+
+    def render(self, snap: Dict[str, Any],
+               terrain: Optional[Dict[str, Any]] = None,
+               follow_uid: Optional[int] = None) -> List[Dict[str, Any]]:
+        self.follow_unit(snap, follow_uid)
+        return self.render_bg(snap) + self.render_fg(snap)
 
     def terrain_image(self, grid) -> Optional[Tuple[bytes, int, int,
                                                      Tuple[float, float, float, float]]]:
