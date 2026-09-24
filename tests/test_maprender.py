@@ -1,11 +1,13 @@
 """Тесты рендера карты: трансформация, растр, слои (без Qt)."""
 from __future__ import annotations
 
+import math
 import unittest
 
 from rwf.maprender import (BLOCK_PALETTE, GridLayer, HudLayer, MapRenderer,
                               MapTransform, MarkersLayer, PlayersLayer,
                               RouteLayer, TerrainRaster, UnitsLayer, ZonesLayer)
+from rwf.ui import theme
 from rwf.routes import Action, Route, Waypoint
 from rwf.units import build_unit
 from rwf.world import World
@@ -228,6 +230,109 @@ class TestRaster(_WorldCase):
         self.assertIsNotNone(img)
         renderer.set_layer_enabled("grid", False)
         self.assertFalse(renderer.layer("grid").enabled)
+
+
+class TestTransformInertia(unittest.TestCase):
+    """UX-02: экспоненциальная инерция камеры MapTransform."""
+
+    def setUp(self):
+        self.tf = MapTransform(size=(800.0, 600.0), view_radius=400.0)
+
+    def test_set_center_deferred_until_tick(self):
+        self.tf.set_center(1000.0, 500.0)
+        self.assertEqual(self.tf.center, (0.0, 0.0))   # ещё не доехала
+        self.assertTrue(self.tf.moving)
+
+    def test_tick_converges_monotonically(self):
+        self.tf.set_center(1000.0, 500.0)
+        prev_dist = math.inf
+        for _ in range(60):
+            changed = self.tf.tick(1 / 60)
+            d = abs(self.tf.center[0] - 1000.0)
+            self.assertLessEqual(d, prev_dist + 1e-9)  # только ближе
+            prev_dist = d
+        self.assertFalse(self.tf.moving)
+        self.assertAlmostEqual(self.tf.center[0], 1000.0, places=1)
+        self.assertTrue(changed or d < 0.1)
+
+    def test_frame_rate_independence(self):
+        """30 кадров по 1/30 и 120 кадров по 1/120 — примерно один путь."""
+        a = MapTransform(size=(800.0, 600.0), view_radius=400.0)
+        b = MapTransform(size=(800.0, 600.0), view_radius=400.0)
+        a.set_center(1000.0, 0.0)
+        b.set_center(1000.0, 0.0)
+        for _ in range(30):
+            a.tick(1 / 30)
+        for _ in range(60):
+            b.tick(1 / 60)   # те же 1 секунда времени
+        self.assertAlmostEqual(a.center[0], b.center[0], delta=5.0)
+
+    def test_snap_jumps_to_target(self):
+        self.tf.set_center(300.0, -200.0)
+        self.tf.snap()
+        self.assertEqual(self.tf.center, (300.0, -200.0))
+        self.assertFalse(self.tf.moving)
+
+    def test_zoom_smooth_and_clamped(self):
+        self.tf.zoom_by(0.5)
+        self.assertNotEqual(self.tf.view_radius, self.tf._target_radius)
+        for _ in range(120):
+            self.tf.tick(1 / 60)
+        self.assertAlmostEqual(self.tf.view_radius,
+                               self.tf._target_radius, places=1)
+        self.tf.set_view_radius(1.0)          # ниже min_radius
+        self.tf.snap()
+        self.assertGreaterEqual(self.tf.view_radius, self.tf.min_radius)
+
+    def test_inertia_off_is_instant(self):
+        self.tf.inertia = False
+        self.tf.set_center(700.0, 700.0)
+        self.assertEqual(self.tf.center, (700.0, 700.0))
+        self.assertFalse(self.tf.tick(1 / 60))    # дёргать нечего
+
+    def test_pan_disables_follow_with_inertia(self):
+        self.tf.pan_screen(50.0, 0.0)
+        self.assertFalse(self.tf.follow)
+        self.tf.tick(1 / 60)
+        self.assertGreater(self.tf.center[0], 0.0)
+
+
+class TestUiScaleTheme(unittest.TestCase):
+    """UX-03: глобальный множитель масштаба UI (headless — без DPG-контекста)."""
+
+    def setUp(self):
+        self._saved = theme.ui_scale()
+
+    def tearDown(self):
+        theme.set_ui_scale(self._saved)
+
+    def test_clamp_bounds(self):
+        self.assertAlmostEqual(theme.set_ui_scale(99.0), theme.UI_SCALE_MAX)
+        self.assertAlmostEqual(theme.set_ui_scale(0.01), theme.UI_SCALE_MIN)
+
+    def test_scale_step_multiplicative(self):
+        theme.set_ui_scale(1.0)
+        up = theme.scale_step(+1)
+        self.assertGreater(up, 1.0)
+        back = theme.scale_step(-1)
+        self.assertAlmostEqual(back, 1.0, places=3)
+
+    def test_scale_step_persists_to_settings(self):
+        from rwf.settings import Settings
+        s = Settings(data={"ui": {"scale": 1.0}})
+        val = theme.scale_step(+1, persist=s)
+        self.assertAlmostEqual(s.get("ui.scale"), round(val, 3))
+
+    def test_scale_step_survives_bad_settings_object(self):
+        class Boom:
+            def set(self, *a):
+                raise RuntimeError("нет файла")
+        theme.set_ui_scale(1.0)
+        self.assertGreater(theme.scale_step(+1, persist=Boom()), 1.0)
+
+    def test_noop_when_same_value(self):
+        theme.set_ui_scale(1.2)
+        self.assertAlmostEqual(theme.set_ui_scale(1.2), 1.2)
 
 
 if __name__ == "__main__":

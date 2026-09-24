@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import dearpygui.dearpygui as dpg
 
 from . import painter
 from . import state as st
+from . import theme
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +113,22 @@ class MapFacade:
         self._bg_key: Optional[Tuple[Any, ...]] = None
         self._bg_prims: List[Dict[str, Any]] = []
         self.ctx = None          # ContextMenu: ставится в app.py (UX-14)
+        #: UX-02: инерция камеры — время предыдущего кадра render()
+        self._last_render_t = time.perf_counter()
+
+    def _dragging(self) -> bool:
+        """Идёт ли ручное панорамирование/тактическая тяга.
+
+        Пока пользователь держит кнопку мыши, камера не должна «догонять»
+        цель — иначе инерция конфликтовала бы с прямым перетаскиванием.
+        """
+        if self._press is not None or self._planner_drag is not None \
+                or self.state.get("tac_drag") is not None:
+            return True
+        try:
+            return dpg.is_mouse_button_down(dpg.mvMouseButton_Left)
+        except Exception:  # noqa: BLE001 - нет контекста DPG (тесты headless)
+            return False
 
     # ------------------------------------------------------------ создание
     def create(self, parent: str, width: float, height: float) -> None:
@@ -202,13 +220,19 @@ class MapFacade:
                      "players", "planner", "tac", "hud"):
             renderer.set_layer_enabled(name, bool(layers.get(name, True)))
 
-        # --- камера: слежение за выбранным ---
+        # --- камера: инерция (UX-02) + слежение за выбранным ---
+        now = time.perf_counter()
+        dt = now - self._last_render_t
+        self._last_render_t = now
         tf.follow = False
         sel = state.get("selection")
         if state.get("follow") and sel is not None:
             u = (state["frame"].get("units") or {}).get(sel)
             if u:
                 tf.set_center(u["pos"][0], u["pos"][2], keep_follow=False)
+                tf.snap()          # слежение — без отставания камеры
+        elif not self._dragging():  # при ручном панорамировании не дёргаем
+            tf.tick(min(dt, 0.1))
 
         # --- черновик планировщика -> слой карты ---
         renderer.planner.points = [
@@ -499,13 +523,18 @@ class MapFacade:
         self.ctx.open_at(mx, my, items)
 
     def _on_wheel(self, sender, app_data, user_data) -> None:
-        if not self._over_pen():
-            return
         try:
             delta = float(app_data)
         except (TypeError, ValueError):
             return
         if abs(delta) < 0.01:
+            return
+        # UX-03: Ctrl+колесо — масштаб интерфейса (шрифт/отступы), где бы
+        # курсор ни находился; без Ctrl и вне карты — ничего.
+        if self._ctrl_down():
+            theme.scale_step(delta, persist=self.facade.settings)
+            return
+        if not self._over_pen():
             return
         factor = 0.85 if delta > 0 else 1.18
         lx, ly = self._pen_pos()

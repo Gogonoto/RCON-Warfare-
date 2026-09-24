@@ -77,7 +77,10 @@ def run(cfg: Optional[AppConfig] = None, headless_frames: int = 0,
     state["new_base"] = {"name": "База 1", "kind": "airport"}
     state["hotbar"] = bool(settings.get("ui.hotbar", True))
     state["settings_ui_right_w"] = int(settings.get("ui.right_w", 444))
-
+    # UX-02/UX-03: сохранённые поведение и масштаб UI применяем до сборки
+    # интерфейса — шрифты создаются сразу с нужным размером, инерция
+    # карты читается из transform при первом же render().
+    theme.set_ui_scale(float(settings.get("ui.scale", 1.0)))
     facade = CoreFacade(cfg, settings=settings)
     facade.start()
 
@@ -90,6 +93,9 @@ def run(cfg: Optional[AppConfig] = None, headless_frames: int = 0,
     theme.load_icon()
 
     map_ui = MapFacade(state, facade)
+    # UX-02: сохранённая настройка инерции применяется к камере сразу
+    map_ui.renderer.transform.inertia = bool(
+        settings.get("ui.inertia", True))
     B.build_static_ui(state, facade, map_ui,
                       on_exit=lambda: dpg.stop_dearpygui())
     map_ui.ctx = ContextMenu(state, facade, map_ui)   # ПКМ-меню (UX-14)

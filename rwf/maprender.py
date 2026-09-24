@@ -74,6 +74,12 @@ class MapTransform:
         self.view_radius = float(view_radius)
         self.center = (float(center[0]), float(center[1]))
         self.follow = True
+        # --- UX-02: инерция камеры (UX-инерция ТЗ-2) ---------------------
+        #: целевые значения; факличные догоняют их экспоненциально в tick().
+        self._target_center = (float(center[0]), float(center[1]))
+        self._target_radius = self.view_radius
+        self.inertia = True          # выключается настройкой ui.inertia
+        self._smoothing = 0.22       # доля «прохождения» за кадр при 60 fps
         self._recalc()
 
     def _recalc(self) -> None:
@@ -87,37 +93,112 @@ class MapTransform:
         self.size = (max(10.0, float(w)), max(10.0, float(h)))
         self._recalc()
 
+    # ------------------------------------------------- инерция (UX-02)
+    @property
+    def moving(self) -> bool:
+        """Камера ещё догоняет цель (нужно продолжать tick + перерисовку)."""
+        return (abs(self.view_radius - self._target_radius) > 0.05
+                or abs(self.center[0] - self._target_center[0]) > 0.3
+                or abs(self.center[1] - self._target_center[1]) > 0.3)
+
+    def snap(self) -> None:
+        """Мгновенно совпасть с целью (конец перетаскивания, слежение)."""
+        self.center = self._target_center
+        if self.view_radius != self._target_radius:
+            self.view_radius = self._target_radius
+            self._recalc()
+
+    def tick(self, dt: float) -> bool:
+        """Сдвинуть камеру к цели; True — если что-то изменилось.
+
+        Экспоненциальное сглаживание frame-rate independent: доля пути за
+        кадр = 1 - exp(-k*dt), поэтому одинаково плавно и на 30, и на 144 fps.
+        """
+        if not self.inertia:
+            changed = (self.center != self._target_center
+                       or self.view_radius != self._target_radius)
+            if changed:
+                self.snap()
+            return changed
+        alpha = 1.0 - math.exp(-max(1e-4, self._smoothing) * 60.0
+                               * max(1e-4, min(dt, 0.1)))
+        changed = False
+        cx, cz = self.center
+        tx, tz = self._target_center
+        ncx = cx + (tx - cx) * alpha
+        ncz = cz + (tz - cz) * alpha
+        if abs(tx - ncx) < 0.05 and abs(tz - ncz) < 0.05:
+            ncx, ncz = tx, tz
+        if (ncx, ncz) != (cx, cz):
+            self.center = (ncx, ncz)
+            changed = True
+        r = self.view_radius
+        tr = self._target_radius
+        nr = r + (tr - r) * alpha
+        if abs(tr - nr) < 0.02:
+            nr = tr
+        if nr != r:
+            self.view_radius = nr
+            self._recalc()
+            changed = True
+        return changed
+
     # -------------------------------------------------------------- центр
     def set_center(self, x: float, z: float, keep_follow: bool = True) -> None:
         """Установить центр. `keep_follow=False` — при ручном панорамировании."""
-        self.center = (float(x), float(z))
+        self._target_center = (float(x), float(z))
+        if not self.inertia:
+            self.center = self._target_center
         if not keep_follow:
             self.follow = False
 
     def pan(self, dx: float, dz: float) -> None:
         """Сдвинуть центр в мировых координатах; отключает слежение."""
-        self.center = (self.center[0] + dx, self.center[1] + dz)
+        self.set_center(self._target_center[0] + dx,
+                        self._target_center[1] + dz, keep_follow=self.follow)
         self.follow = False
 
     def pan_screen(self, dpx: float, dpy: float) -> None:
         """Сдвинуть на величину в пикселях (для WASD)."""
-        self.pan(dpx / self.scale, dpy / self.scale)
+        s = self.scale if self.scale > 0 else 1.0
+        self.pan(dpx / s, dpy / s)
 
     def set_view_radius(self, r: float) -> None:
-        self.view_radius = max(self.min_radius, min(self.max_radius, float(r)))
-        self._recalc()
+        self._target_radius = max(self.min_radius,
+                                  min(self.max_radius, float(r)))
+        if not self.inertia:
+            self.view_radius = self._target_radius
+            self._recalc()
 
     def zoom_by(self, factor: float) -> None:
-        self.set_view_radius(self.view_radius * factor)
+        self.set_view_radius(self._target_radius * factor)
 
     def zoom_at(self, factor: float, sx: float, sy: float) -> None:
         """Зум с центром в точке экрана (MAP-05): мировая точка под курсором
-        остаётся под курсором."""
-        wx, wz = self.to_world(sx, sy)
-        self.set_view_radius(self.view_radius * factor)
-        nx, ny = self.to_screen(wx, wz)
-        self.center = (self.center[0] + (nx - sx) / self.scale,
-                       self.center[1] + (ny - sy) / self.scale)
+        остаётся под курсором (в терминах целевой камеры — она же и является
+        якорем, пока камера догоняет её с инерцией)."""
+        wx, wz = self._to_world_t(sx, sy)
+        self.set_view_radius(self._target_radius * factor)
+        nx, ny = self._to_screen_t(wx, wz)
+        self.set_center(self._target_center[0] + (nx - sx) / self._scale_t(),
+                        self._target_center[1] + (ny - sy) / self._scale_t(),
+                        keep_follow=self.follow)
+
+    # ------------------------------------------- преобразования для цели
+    def _scale_t(self) -> float:
+        return min(self.size[0], self.size[1]) / (2.0 * self._target_radius)
+
+    def _to_screen_t(self, wx: float, wz: float) -> Vec2:
+        s = self._scale_t()
+        return (self.cx + (wx - self._target_center[0]) * s,
+                self.cy + (wz - self._target_center[1]) * s)
+
+    def _to_world_t(self, sx: float, sy: float) -> Vec2:
+        s = self._scale_t()
+        if s <= 0:
+            return self._target_center
+        return (self._target_center[0] + (sx - self.cx) / s,
+                self._target_center[1] + (sy - self.cy) / s)
 
     # ---------------------------------------------------------- преобразования
     def to_screen(self, wx: float, wz: float) -> Vec2:

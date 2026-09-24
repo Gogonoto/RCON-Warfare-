@@ -1,4 +1,6 @@
+# Compiled/Binary files
 __pycache__/
 *.pyc
-**/__pycache__/
-*.pyc
+
+# Editor/IDE files
+.vscode/

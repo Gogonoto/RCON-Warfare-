@@ -139,6 +139,8 @@ class UIConfig:
     silent_chat: bool = False          # не писать tellraw в игровой чат
     hotkeys_wasd: bool = True
     confirm_destructive: bool = True   # спрашивать перед fill/kill
+    inertia: bool = True               # UX-02: инерция камеры карты
+    ui_scale: float = 1.0              # UX-03: масштаб UI (Ctrl+колесо)
 
 
 @dataclass

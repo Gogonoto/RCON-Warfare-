@@ -54,6 +54,8 @@ DEFAULTS: Dict[str, Any] = {
         "tele_h": 252,
         "hotbar": True,                   # левая панель инструментов видима
         "icon_scale": 1.0,
+        "inertia": True,                  # UX-02: инерция камеры карты
+        "scale": 1.0,                     # UX-03: масштаб UI (Ctrl+колесо)
     },
 }
 
