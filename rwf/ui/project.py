@@ -66,6 +66,25 @@ def project_state_to_widgets(state: Dict[str, Any], facade) -> None:
     _project_players(state, sig)
     _project_log(state, sig)
     _project_library(state, sig)
+    _project_ui_scale(sig)
+
+
+# ------------------------------------------------------------- масштаб UI
+def _project_ui_scale(sig: Dict[str, Any]) -> None:
+    """UX-03: процент масштаба в настройках. Обновляем только при изменении
+    (Ctrl+колесо меняет масштаб мимо слайдера — подпись должна догонять)."""
+    if not dpg.does_item_exist("txt_ui_scale"):
+        return
+    s = T.ui_scale()
+    txt = f"{s * 100:.0f}%"
+    if sig.get("ui_scale") == txt:
+        return
+    sig["ui_scale"] = txt
+    dpg.set_value("txt_ui_scale", txt)
+    # слайдер тоже синхронизируем (кламп на границах уже учтён в s)
+    if dpg.does_item_exist("sld_ui_scale") \
+            and abs(dpg.get_value("sld_ui_scale") - s) > 1e-4:
+        dpg.set_value("sld_ui_scale", s)
 
 
 # ------------------------------------------------------------- статус-строка

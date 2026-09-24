@@ -303,11 +303,19 @@ class CoreFacade:
                 # DPG 2.x принимает только float-текстуры: конвертируем
                 # RGB-байты в float32 (0..1) ЗДЕСЬ, в рабочем потоке (I5),
                 # чтобы главный цикл не тратил кадр на пересчёт.
+                # Векторная ветка (numpy) быстрее генератора в ~50 раз —
+                # на растре 1 Мп это секунды против десятков миллисекунд.
+                floats = None
                 try:
-                    from array import array
-                    floats = array("f", (b * (1.0 / 255.0) for b in buf))
-                except Exception:  # noqa: BLE001
-                    floats = None
+                    import numpy as np
+                    arr = np.frombuffer(buf, dtype=np.uint8)
+                    floats = (arr.astype(np.float32) * (1.0 / 255.0)).ravel()
+                except ImportError:
+                    try:
+                        from array import array
+                        floats = array("f", (b * (1.0 / 255.0) for b in buf))
+                    except Exception:  # noqa: BLE001
+                        floats = None
                 if floats is not None:
                     q.put(("terrain", floats, w, h, world_rect, key))
 
@@ -382,6 +390,97 @@ class CoreFacade:
     def select(self, uid: Optional[int]) -> None:
         self.selected_uid = uid
         self.msg_q.put(("selected", uid))
+
+    # ------------------------------------------------ тактическое управление
+    #  TAC-01 (п.17 ТЗ): клики/тяги карты превращаются здесь в реальные
+    #  маршруты движка. Вызывается из колбэков DPG главного потока через
+    #  send() (out_q), поэтому STATE читается без гонок с потоком снапшотов.
+    def tac_select(self, uid: Optional[int], additive: bool = False) -> None:
+        """Выбор юнита (одиночный/множественный) синхронно с out_q."""
+        from . import state as st
+        st.tac_select(self.state, uid, additive=additive)
+        self.select(self.state.get("selection"))
+
+    def _tac_altitude(self, uid: int, frame_units: Dict[Any, Any]) -> float:
+        """Высота точки маршрута: текущая у воздуха, рельеф+1 у земли.
+
+        Ключи ``frame["units"]`` — int (см. ``World.snapshot``), но на
+        всякий случай пробуем и строковый вариант (uid мог прийти из JSON).
+        """
+        u = frame_units.get(uid) or frame_units.get(str(uid)) or {}
+        kind = str(u.get("kind", ""))
+        pos = u.get("pos") or (0.0, 150.0, 0.0)
+        app = self.app
+        ground = None
+        if app is not None:
+            try:
+                ground = app.world.terrain.height_at(pos[0], pos[2])
+            except Exception:  # noqa: BLE001 - рельеф может быть пуст
+                ground = None
+        if u.get("ground") or kind in ("tank", "apc", "truck", "artillery",
+                                       "ifv") or "ground" in kind:
+            return float(ground if ground is not None else 0.0) + 1.0
+        alt = max(float(pos[1]), 60.0)
+        if ground is not None:
+            alt = max(alt, float(ground) + 15.0)
+        return alt
+
+    def tac_apply(self, uids: List[int]) -> bool:
+        """Отправить черновики маршрутов STATE движку (и снять их)."""
+        from . import state as st
+        if not self._require_connection():
+            return False
+        assert self.app is not None
+        frame_units = self.state["frame"].get("units") or {}
+        sent = 0
+        for uid in uids or []:
+            uid = int(uid)
+            pts = list((self.state["unit_routes"] or {}).get(uid) or [])
+            tgt = (self.state["tac_targets"] or {}).get(uid)
+            if not pts and not tgt:
+                continue
+            alt = self._tac_altitude(uid, frame_units)
+            wps = [Waypoint(x=float(p["x"]), z=float(p["z"]), altitude=alt,
+                            action=Action.NAVIGATE) for p in pts]
+            if tgt:
+                strike = str(tgt.get("strike", "auto"))
+                action = {
+                    "auto": Action.MISSILE,
+                    "missile": Action.MISSILE,
+                    "bomb": Action.BOMB,
+                    "strafe": Action.STRAFE,
+                    "kamikaze": Action.KAMIKAZE,
+                    "navigate": Action.NAVIGATE,
+                }.get(strike, Action.MISSILE)
+                tname = str(tgt.get("name", "")) \
+                    if tgt.get("kind") == "player" else ""
+                wps.append(Waypoint(x=float(tgt["x"]), z=float(tgt["z"]),
+                                    altitude=alt, action=action,
+                                    target_name=tname))
+            route = Route(wps, uid, name="тактика оператора")
+            self.app.engine.assign_route(uid, route)
+            st.tac_clear_route_points(self.state, uid)
+            sent += 1
+        if sent:
+            self.msg_q.put(("log", f"Тактика: маршруты назначены "
+                                   f"({sent} ед.)", "green"))
+        return bool(sent)
+
+    def tac_set_strike(self, uid: int, strike: str) -> None:
+        """Сменить тип удара по засечённой цели и переназначить маршрут."""
+        tgt = self.state.get("tac_targets", {}).get(int(uid))
+        if tgt is None:
+            self.msg_q.put(("log", f"#{uid}: цель не засечена", "yellow"))
+            return
+        tgt["strike"] = str(strike)
+        self.tac_apply([int(uid)])
+        self.msg_q.put(("log", f"#{uid}: тип удара — {strike}", "cyan"))
+
+    def tac_clear_target(self, uid: int) -> None:
+        """Снять засечённую цель с юнита (маршрут остаётся)."""
+        from . import state as st
+        st.tac_set_target(self.state, int(uid), None)
+        self.msg_q.put(("log", f"#{uid}: цель снята", "yellow"))
 
     def select_base(self, base_id: Optional[int]) -> None:
         self.selected_base_id = base_id

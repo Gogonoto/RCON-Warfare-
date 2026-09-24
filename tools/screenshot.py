@@ -129,6 +129,27 @@ class Demo:
         if self.phase == 3 and frames > 240:
             # захват ПЗРК игроком (демонстрация дока «Игроки и ПЗРК»)
             self.phase = 4
+            # TAC-01 (п.17): черновой маршрут + засечённая цель у выбранной
+            # машины — слой TacLayer рисует их поверх карты прямо в кадре.
+            uid0 = self.uids[0] if self.uids else None
+            if uid0 is not None:
+                S.tac_select(state, uid0)
+                for tx, tz in ((-120.0, -60.0), (-30.0, 20.0), (90.0, -20.0)):
+                    S.tac_add_point(state, uid0, tx, tz)
+                tgt_units = state["frame"].get("units") or {}
+                bots1 = [u for u in tgt_units
+                         if u != uid0 and tgt_units[u].get("is_bot")]
+                victim = bots1[0] if bots1 else None
+                if victim is not None:
+                    vp = tgt_units[victim].get("pos") or (0.0, 0.0, 0.0)
+                    S.tac_set_target(state, uid0, {
+                        "kind": "unit", "name": f"цель #{victim}",
+                        "x": float(vp[0]), "z": float(vp[2]),
+                        "strike": "missile"})
+                else:
+                    S.tac_set_target(state, uid0, {
+                        "kind": "base", "name": "Гарнизон",
+                        "x": 320.0, "z": -240.0, "strike": "bomb"})
             app = facade.app
             if app is not None and app.manpads is not None:
                 players = app.world.get_players()

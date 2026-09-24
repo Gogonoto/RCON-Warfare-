@@ -159,6 +159,7 @@ def build_static_ui(state: Dict[str, Any], facade, map_ui: MapFacade,
     bind_state(state)
     _TOOL_STATE["facade"] = facade
     _TOOL_STATE["on_exit"] = on_exit
+    _TOOL_STATE["map_ui"] = map_ui      # UX-02: переключение инерции камеры
     _TOOL_STATE["hotbar"] = bool(state.get("hotbar", True))
     _TOOL_STATE["objpanel"] = bool(state.get("objpanel", True))
     dpg.add_texture_registry(tag=TEX_REGISTRY)
@@ -1599,6 +1600,24 @@ def _dock_settings(state: Dict[str, Any], facade) -> None:
             dpg.add_checkbox(label=name, tag=f"chk_ev_{name}",
                              default_value=bool(ev.get(name, True)),
                              user_data=name, callback=_cb_sound_event)
+    # --- UX-02/UX-03: поведение интерфейса -------------------------------
+    with dpg.group(horizontal=True):
+        dpg.add_checkbox(label="Инерция карты", tag="chk_inertia",
+                         default_value=bool(facade.settings.get(
+                             "ui.inertia", True)),
+                         callback=_cb_inertia_toggle)
+    with dpg.group(horizontal=True):
+        tcol("Масштаб UI", 96, color=T.TEXT_DIM)
+        dpg.add_slider_float(tag="sld_ui_scale", width=150, min_value=T.UI_SCALE_MIN,
+                             max_value=T.UI_SCALE_MAX, format="%.2f",
+                             default_value=float(facade.settings.get(
+                                 "ui.scale", T.ui_scale())),
+                             callback=_cb_ui_scale)
+        dpg.add_button(label="100%", width=48, height=20,
+                       callback=_cb_ui_scale_reset)
+        tcol("", 44, tag="txt_ui_scale", color=T.TEXT_DIM)
+    with dpg.group(horizontal=True):
+        dpg.add_text("Ctrl+колесо — масштаб интерфейса", color=T.TEXT_DIM)
     with dpg.group(horizontal=True):
         dpg.add_button(label="Сохранить настройки", width=170, height=22,
                        callback=_cb_settings_save)
@@ -1625,6 +1644,33 @@ def _cb_volume(sender, app_data, user_data) -> None:
 def _cb_sound_event(sender, app_data, user_data) -> None:
     _TOOL_STATE["facade"].set_setting(f"sound.events.{user_data}",
                                       bool(app_data))
+
+
+def _apply_inertia(value: bool) -> None:
+    """UX-02: включить/выключить инерцию камеры (влияет сразу)."""
+    map_ui = _TOOL_STATE.get("map_ui")
+    if map_ui is not None:
+        map_ui.renderer.transform.inertia = bool(value)
+
+
+def _cb_inertia_toggle(sender, app_data, user_data) -> None:
+    val = bool(app_data)
+    _TOOL_STATE["inertia"] = val
+    _apply_inertia(val)
+    _TOOL_STATE["facade"].set_setting("ui.inertia", val)
+
+
+def _cb_ui_scale(sender, app_data, user_data) -> None:
+    """UX-03: слайдер масштаба UI; текст процента обновляется из проекции."""
+    val = T.set_ui_scale(float(app_data))
+    _TOOL_STATE["facade"].set_setting("ui.scale", round(val, 3))
+    if dpg.does_item_exist("sld_ui_scale") \
+            and abs(dpg.get_value("sld_ui_scale") - val) > 1e-4:
+        dpg.set_value("sld_ui_scale", val)   # если утёрся о границы клампа
+
+
+def _cb_ui_scale_reset(sender, app_data, user_data) -> None:
+    _cb_ui_scale(sender, 1.0, user_data)
 
 
 def _cb_settings_save(sender, app_data, user_data) -> None:

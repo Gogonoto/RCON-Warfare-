@@ -42,6 +42,116 @@ _BOLD_CANDIDATES = [
 FONT_SIZE = 14.0
 BOLD_FONT_SIZE = 14.0
 
+#: UX-03: глобальный множитель масштаба интерфейса (Ctrl+колесо).
+#: 1.0 — по умолчанию; границы жёсткие, чтобы не сломать раскладку.
+UI_SCALE_MIN = 0.6
+UI_SCALE_MAX = 2.0
+_ui_scale = 1.0
+
+
+def ui_scale() -> float:
+    return _ui_scale
+
+
+def set_ui_scale(value: float) -> float:
+    """Задать масштаб UI и применить его (шрифт + стилизационные отступы).
+
+    Возвращает фактически установленное значение (после клампа).
+    """
+    global _ui_scale
+    value = max(UI_SCALE_MIN, min(UI_SCALE_MAX, float(value)))
+    if abs(value - _ui_scale) < 1e-4:
+        return _ui_scale
+    _ui_scale = value
+    apply_ui_scale()
+    return _ui_scale
+
+
+def scale_step(delta: float, persist=None) -> float:
+    """Шаг колесом: delta>0 — увеличить. Мультипликативно, плавно.
+
+    `persist` — объект настроек (`Settings`) или None; при передаче значение
+    сразу сохраняется в `ui.scale`, чтобы Ctrl+колесо не «терялось» после
+    перезапуска (слайдер в настройках обновится из проекции).
+    """
+    val = set_ui_scale(_ui_scale * (1.07 if delta > 0 else 1 / 1.07))
+    if persist is not None:
+        try:
+            persist.set("ui.scale", round(val, 3))
+        except Exception:  # noqa: BLE001 - настройки не роняют обработчик мыши
+            pass
+    return val
+
+
+def context_ready() -> bool:
+    """Есть ли живой DPG-контекст, в котором можно трогать тему/шрифты.
+
+    ВАЖНО (регресс UX-03): нативные вызовы dpg (`does_item_exist` и др.)
+    ДО создания контекста — segfault в C-слое, try/except не спасает.
+    Все DPG-мутации обязаны сначала спрашивать этот предикат.
+    """
+    return bool(getattr(dpg, "is_context_created", lambda: False)())
+
+
+def apply_ui_scale() -> None:
+    """Пересоздать шрифты под текущий масштаб и перепривязать их.
+
+    DPG хранит размер шрифта внутри объекта mvFont — единственный способ
+    изменить его на лету: удалить регистр и создать заново. Стилизационные
+    отступы (padding/spacing) масштабируются темами стилей поверх базовых.
+
+    Вызов без живого DPG-контекста — no-op (headless-тесты, старт до
+    `dpg.create_context()`). Само значение масштаба при этом сохраняется
+    вызывающим (`set_ui_scale`), и применится позже через `bind()`.
+    """
+    if not context_ready():
+        return
+    s = _ui_scale
+    try:
+        # 1) шрифты
+        font_path = find_font()
+        if font_path and dpg.does_item_exist("font_registry"):
+            for tag in ("font_bold", "font_regular"):
+                if dpg.does_item_exist(tag):
+                    dpg.delete_item(tag)
+            with dpg.add_global_font_registry(parent="font_registry") as reg:
+                font = dpg.add_font(font_path, max(8, int(round(FONT_SIZE * s))),
+                                    parent=reg, tag="font_regular")
+                bold_path = find_bold_font()
+                if bold_path:
+                    dpg.add_font(bold_path,
+                                 max(8, int(round(BOLD_FONT_SIZE * s))),
+                                 parent=reg, tag="font_bold")
+            dpg.bind_font(font)
+        # 2) отступы/размеры рамок — через компонент темы с тем же родителем
+        comp = "c2_scale_comp"
+        if dpg.does_item_exist(comp):
+            dpg.delete_item(comp)
+        theme = "c2_theme"
+        if not dpg.does_item_exist(theme):
+            return
+        scaled: List[tuple] = [
+            (dpg.mvStyleVar_WindowPadding, (round(10 * s), round(8 * s))),
+            (dpg.mvStyleVar_FramePadding, (round(7 * s), round(5 * s))),
+            (dpg.mvStyleVar_ItemSpacing, (round(8 * s), round(6 * s))),
+            (dpg.mvStyleVar_ItemInnerSpacing, (round(5 * s), round(4 * s))),
+            (dpg.mvStyleVar_IndentSpacing, round(16 * s)),
+            (dpg.mvStyleVar_ScrollbarSize, round(11 * s)),
+            (dpg.mvStyleVar_GrabMinSize, round(9 * s)),
+        ]
+        with dpg.theme_component(dpg.mvAll, parent=theme, tag=comp):
+            for target, value in scaled:
+                if isinstance(value, tuple):
+                    dpg.add_theme_style(target, value[0], value[1],
+                                        category=dpg.mvThemeCat_Core,
+                                        parent=comp)
+                else:
+                    dpg.add_theme_style(target, value,
+                                        category=dpg.mvThemeCat_Core,
+                                        parent=comp)
+    except Exception as exc:  # noqa: BLE001 - масштаб не роняет приложение
+        log.warning("Не удалось применить масштаб UI %s: %s", s, exc)
+
 # ---------------------------------------------------------------------------
 #  Палитра: графитовая подложка, люминофорно-зелёный акцент,
 #  функциональные цвета (cyan/amber/red) — без «радуги» дефолта DPG
@@ -191,12 +301,14 @@ def bind() -> Optional[str]:
     font_path = find_font()
     if font_path:
         try:
+            s = _ui_scale   # UX-03: масштаб из настроек применяется сразу
             with dpg.font_registry(tag="font_registry"):
-                font = dpg.add_font(font_path, int(FONT_SIZE),
+                font = dpg.add_font(font_path, max(8, int(round(FONT_SIZE * s))),
                                     tag="font_regular")
                 bold_path = find_bold_font()
                 if bold_path:
-                    dpg.add_font(bold_path, int(BOLD_FONT_SIZE),
+                    dpg.add_font(bold_path,
+                                 max(8, int(round(BOLD_FONT_SIZE * s))),
                                  tag="font_bold")
             dpg.bind_font(font)
         except Exception as exc:  # noqa: BLE001
@@ -206,6 +318,7 @@ def bind() -> Optional[str]:
         log.warning("Шрифт с кириллицей не найден — текст может отображаться "
                     "как «?»")
     dpg.set_viewport_clear_color(list(BG)[:3] + [255])
+    apply_ui_scale()   # отступы/размеры рамок — в тот же кадр, без пересоздания шрифтов
     return font_path
 
 
