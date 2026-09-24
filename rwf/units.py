@@ -863,9 +863,9 @@ def _approach(current: float, target: float, rate: float, dt: float) -> float:
     return current + math.copysign(limit, delta)
 
 
-def _angle_diff(target: float, current: float) -> float:
-    """Разница курсов в пределах −180..+180 (знак = куда крутить)."""
-    return (target - current + 540.0) % 360.0 - 180.0
+# П1.1: реализация — в geometry.py (единый источник правды для углов).
+# Здесь только реэкспорт с историческим именем `_angle_diff`.
+from .geometry import angle_diff as _angle_diff  # noqa: F401
 
 
 # ---------------------------------------------------------------------------

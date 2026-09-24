@@ -34,6 +34,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import mc
 from .config import CombatConfig
+from .geometry import distance as _geo_distance
 from .events import TOPIC_WEAPON_FIRED, EventBus
 from .rcon import CommandQueue, Priority
 
@@ -275,7 +276,9 @@ class Target:
 
 
 def distance(a: Vec3, b: Vec3) -> float:
-    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+    # P1.1: единый источник правды — geometry.distance; оставляем имя в
+    # модуле (его импортируют missiles.py/ai.py и тесты) как тонкую обёртку.
+    return _geo_distance(a, b)
 
 
 def solve_lead(shooter: Vec3, target: Vec3, target_vel: Vec3,

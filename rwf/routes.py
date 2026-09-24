@@ -42,6 +42,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import mc
+# П1.1: углы/векторы — только из geometry.py (единственный источник правды).
+from .geometry import angle_diff, forward_vec, right_vec, yaw_to  # noqa: F401
 from .config import AppConfig
 from .events import EventBus
 from .weapons import PendingEffect, Target, WeaponSystem
@@ -460,7 +462,7 @@ class RouteExecutor:
         dx, dz = tx - px, tz - pz
         dist_h = math.hypot(dx, dz)
         alt_err = wp.altitude - py
-        heading = math.degrees(math.atan2(-dx, dz)) % 360.0
+        heading = yaw_to(dx, dz)   # P1.1: единая формула в geometry.py
 
         throttle = None
         if wp.speed is not None:
@@ -489,7 +491,7 @@ class RouteExecutor:
         limit = min(spec.max_pitch * 0.6, 25.0)
         want_pitch = 0.0
         if dist_h > 1.0:
-            want_pitch = -math.degrees(math.atan2(alt_err, dist_h))
+            want_pitch = -math.degrees(math.atan2(alt_err, dist_h))  # тангаж к высоте точки — не yaw, остаётся локально
         else:
             want_pitch = -limit if alt_err > 0 else limit
         want_pitch = max(-limit, min(limit, want_pitch))
@@ -803,7 +805,7 @@ class RouteExecutor:
         px, py, pz = unit.pos
         dist_h = math.hypot(tx - px, tz - pz)
         dist_v = py - ty
-        heading = math.degrees(math.atan2(-(tx - px), tz - pz)) % 360.0
+        heading = yaw_to(tx - px, tz - pz)   # P1.1: единая формула в geometry.py
 
         if spec.ground_unit:
             unit.set_target(heading=heading, throttle=1.0)

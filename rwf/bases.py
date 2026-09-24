@@ -90,27 +90,11 @@ BASE_SUPPLY = {KIND_AIRPORT: 420.0, KIND_CARRIER: 300.0,
 BASE_REGEN = {KIND_AIRPORT: 2.2, KIND_CARRIER: 0.0, KIND_GROUND: 1.6}
 
 
-def forward_vec(heading_deg: float) -> Vec2:
-    """Вектор «вперёд» для yaw Minecraft: 0 = +Z, 90 = −X."""
-    h = math.radians(heading_deg)
-    return (-math.sin(h), math.cos(h))
-
-
-def right_vec(heading_deg: float) -> Vec2:
-    """Вектор «вправо» для yaw Minecraft."""
-    h = math.radians(heading_deg)
-    return (math.cos(h), math.sin(h))
-
-
-def yaw_to(dx: float, dz: float) -> float:
-    """Yaw Minecraft, соответствующий направлению (dx, dz)."""
-    return math.degrees(math.atan2(-dx, dz)) % 360.0
-
-
-def angle_diff(target: float, current: float) -> float:
-    """Кратчайшая разница курсов в градусах, [-180, 180]."""
-    d = (target - current + 180.0) % 360.0 - 180.0
-    return d
+# Единый источник правды для углов/векторов — geometry.py (P1.1, §4.10).
+# Реэкспорт СТРОГО обязателен: test_carrier.py и engine.py импортируют эти
+# имена из rwf.bases; удалять строку нельзя даже при «зачистке импортов».
+from .geometry import (angle_diff, clamp, forward_vec,  # noqa: F401
+                       right_vec, yaw_to)
 
 
 # ---------------------------------------------------------------------------
