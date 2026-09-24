@@ -649,70 +649,93 @@ class RouteExecutor:
 
     # ------------------------------------------------------- после достижения
     def _run_action(self, route: Route, wp: Waypoint, dt: float) -> None:
-        """Таймер растёт в ЛЮБОЙ ветке — действие не может зависнуть (ROUTE-03)."""
+        """Диспетчер действий на точке (P2.2).
+
+        Таймер растёт в ЛЮБОЙ ветке — действие не может зависнуть (ROUTE-03);
+        общий предохранитель — в конце, он действует и на ветки без своего
+        лимита. Новые действия добавляются в `_ACTION_HANDLERS`, а не через
+        elif здесь.
+        """
         self.action_timer += dt
-        act = wp.action
         unit = self.unit
         if not unit.alive:
             return
+        handler = self._ACTION_HANDLERS.get(wp.action, self._act_none)
+        # функции в _ACTION_HANDLERS — простые (не bound-методы), self передаём явно
+        handler(self, route, wp, dt)
+        self._guard_action_timeout(route, wp)
 
-        if act == Action.BOMB:
-            if wp.action_done:
-                self._finish_action(route, wp, ok=True,
-                                    report=self.last_action_report or "сброс выполнен")
-            else:
-                # Не сбросили на подходе (не успели/нет цели) — пробуем сейчас
-                target = self._target_for(wp)
-                self._release_bombs(route, wp, target)
-                if self.action_timer > 3.0 and not wp.action_done:
-                    wp.skipped = True
-                    self._finish_action(route, wp, ok=False, report="сброс не удался")
-
-        elif act == Action.MISSILE:
-            if wp.action_done:
-                self._finish_action(route, wp, ok=True,
-                                    report=self.last_action_report or "пуск выполнен")
-            else:
-                target = self._target_for(wp)
-                self._launch_missiles(route, wp, target)
-                if self.action_timer > 4.0 and not wp.action_done:
-                    wp.skipped = True
-                    self._finish_action(route, wp, ok=False, report="пуск не удался")
-
-        elif act == Action.STRAFE:
-            # Обстрел идёт на пролёте: продолжаем лететь к точке и стрелять
-            self._fly_to(wp)
-            target = self._target_for(wp)
-            cats = Action.CATEGORIES[Action.STRAFE]
-            if self.action_timer <= wp.duration and self.unit.alive:
-                shots = 0
-                for mount in unit.mounts:
-                    if mount.category in cats and shots < max(1, wp.count):
-                        if self.weapons.fire(unit, mount, target):
-                            shots += 1
-                            wp.action_done = True
-                if shots == 0 and not any(m.category in cats and m.ammo > 0
-                                          for m in unit.mounts):
-                    wp.skipped = True
-                    self._finish_action(route, wp, ok=False, report="нет боезапаса")
-                    return
-            if self.action_timer >= wp.duration:
-                report = "обстрел завершён" if wp.action_done else "обстрел не удался"
-                self._finish_action(route, wp, ok=wp.action_done, report=report)
-
-        elif act == Action.HOLD:
-            self._do_hold(route, wp, dt)
-
-        elif act == Action.RECON:
-            self._do_recon(route, wp, dt)
-
-        else:
-            self._finish_action(route, wp, ok=True, report="нет действия")
-
-        # Общий предохранитель: никакое действие не длится вечно
-        if self.state == "action" and                 self.action_timer > max(wp.duration, 1.0) * 4.0 + 12.0:
+    def _guard_action_timeout(self, route: Route, wp: Waypoint) -> None:
+        """Общий предохранитель: никакое действие не длится вечно."""
+        act = wp.action
+        if self.state == "action" and \
+                self.action_timer > max(wp.duration, 1.0) * 4.0 + 12.0:
             route.note(f"Действие {ACTION_LABELS.get(act, act)} прервано по таймауту")
             self._finish_action(route, wp, ok=wp.action_done, report="таймаут")
+
+    # --- обработчики (бывшие ветки elif; логика перенесена дословно) -------
+    def _act_bomb(self, route: Route, wp: Waypoint, dt: float) -> None:
+        if wp.action_done:
+            self._finish_action(route, wp, ok=True,
+                                report=self.last_action_report or "сброс выполнен")
+        else:
+            # Не сбросили на подходе (не успели/нет цели) — пробуем сейчас
+            target = self._target_for(wp)
+            self._release_bombs(route, wp, target)
+            if self.action_timer > 3.0 and not wp.action_done:
+                wp.skipped = True
+                self._finish_action(route, wp, ok=False, report="сброс не удался")
+
+    def _act_missile(self, route: Route, wp: Waypoint, dt: float) -> None:
+        if wp.action_done:
+            self._finish_action(route, wp, ok=True,
+                                report=self.last_action_report or "пуск выполнен")
+        else:
+            target = self._target_for(wp)
+            self._launch_missiles(route, wp, target)
+            if self.action_timer > 4.0 and not wp.action_done:
+                wp.skipped = True
+                self._finish_action(route, wp, ok=False, report="пуск не удался")
+
+    def _act_strafe(self, route: Route, wp: Waypoint, dt: float) -> None:
+        # Обстрел идёт на пролёте: продолжаем лететь к точке и стрелять
+        unit = self.unit
+        self._fly_to(wp)
+        target = self._target_for(wp)
+        cats = Action.CATEGORIES[Action.STRAFE]
+        if self.action_timer <= wp.duration and self.unit.alive:
+            shots = 0
+            for mount in unit.mounts:
+                if mount.category in cats and shots < max(1, wp.count):
+                    if self.weapons.fire(unit, mount, target):
+                        shots += 1
+                        wp.action_done = True
+            if shots == 0 and not any(m.category in cats and m.ammo > 0
+                                      for m in unit.mounts):
+                wp.skipped = True
+                self._finish_action(route, wp, ok=False, report="нет боезапаса")
+                return
+        if self.action_timer >= wp.duration:
+            report = "обстрел завершён" if wp.action_done else "обстрел не удался"
+            self._finish_action(route, wp, ok=wp.action_done, report=report)
+
+    def _act_hold(self, route: Route, wp: Waypoint, dt: float) -> None:
+        self._do_hold(route, wp, dt)
+
+    def _act_recon(self, route: Route, wp: Waypoint, dt: float) -> None:
+        self._do_recon(route, wp, dt)
+
+    def _act_none(self, route: Route, wp: Waypoint, dt: float) -> None:
+        self._finish_action(route, wp, ok=True, report="нет действия")
+
+    #: таблица диспетчера P2.2: действие → обработчик
+    _ACTION_HANDLERS = {
+        Action.BOMB: _act_bomb,
+        Action.MISSILE: _act_missile,
+        Action.STRAFE: _act_strafe,
+        Action.HOLD: _act_hold,
+        Action.RECON: _act_recon,
+    }
 
     def _target_for(self, wp: Waypoint) -> Target:
         """Цель действия: названный игрок (живая позиция), иначе сама точка.
