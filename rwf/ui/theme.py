@@ -83,13 +83,29 @@ def scale_step(delta: float, persist=None) -> float:
     return val
 
 
+def context_ready() -> bool:
+    """Есть ли живой DPG-контекст, в котором можно трогать тему/шрифты.
+
+    ВАЖНО (регресс UX-03): нативные вызовы dpg (`does_item_exist` и др.)
+    ДО создания контекста — segfault в C-слое, try/except не спасает.
+    Все DPG-мутации обязаны сначала спрашивать этот предикат.
+    """
+    return bool(getattr(dpg, "is_context_created", lambda: False)())
+
+
 def apply_ui_scale() -> None:
     """Пересоздать шрифты под текущий масштаб и перепривязать их.
 
     DPG хранит размер шрифта внутри объекта mvFont — единственный способ
     изменить его на лету: удалить регистр и создать заново. Стилизационные
     отступы (padding/spacing) масштабируются темами стилей поверх базовых.
+
+    Вызов без живого DPG-контекста — no-op (headless-тесты, старт до
+    `dpg.create_context()`). Само значение масштаба при этом сохраняется
+    вызывающим (`set_ui_scale`), и применится позже через `bind()`.
     """
+    if not context_ready():
+        return
     s = _ui_scale
     try:
         # 1) шрифты
