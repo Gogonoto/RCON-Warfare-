@@ -34,6 +34,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import mc
 from .config import CombatConfig
+from .geometry import distance as _geo_distance
 from .events import TOPIC_WEAPON_FIRED, EventBus
 from .rcon import CommandQueue, Priority
 
@@ -275,7 +276,9 @@ class Target:
 
 
 def distance(a: Vec3, b: Vec3) -> float:
-    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+    # P1.1: единый источник правды — geometry.distance; оставляем имя в
+    # модуле (его импортируют missiles.py/ai.py и тесты) как тонкую обёртку.
+    return _geo_distance(a, b)
 
 
 def solve_lead(shooter: Vec3, target: Vec3, target_vel: Vec3,
@@ -716,32 +719,46 @@ class WeaponSystem:
                origin[2] + direction[2] * 3.0)
         if self.missile_manager is not None and \
                 getattr(self.cfg, "use_block_missiles", True):
-            from .missiles import MissileSpec
-            mspec = MissileSpec(label=str(spec.get("label", "УР")),
-                                speed=max(40.0, min(220.0, vel_mps)),
-                                damage=self._damage_for(spec),
-                                blast_radius=float(spec.get("crater_r", 3)) * 2.5 + 6.0)
-            homing = (self.world.get_unit(target.unit_id)
-                      if target.unit_id is not None else None)
-            self.missile_manager.launch(pos, (direction[0] * vel_mps,
-                                              direction[1] * vel_mps,
-                                              direction[2] * vel_mps),
-                                 target, mspec, owner_id=unit.id,
-                                 owner_label=unit.spec.label,
-                                 weapon_key=mount.key or "agm",
-                                 homing_unit=homing)
-            mount.mark_fired()
-            self.missiles_launched += 1
-            self._fx(unit, "minecraft:entity.firework_rocket.launch", origin, 1.2, 0.8)
-            return True
+            self._launch_block_missile(unit, mount, spec, target, origin,
+                                       direction, pos, vel_mps)
+        else:
+            self._launch_guided_missile(unit, mount, pos, vel, target)
+        # Инвариант P2.3: боезапас списывается РОВНО ОДИН раз на пуск —
+        # только через consume(1) выше. Ни один из путей пуска (_launch_*)
+        # не имеет права трогать mount.ammo (регресс WPN-08).
+        mount.mark_fired()
+        self.missiles_launched += 1
+        self._fx(unit, "minecraft:entity.firework_rocket.launch", origin, 1.2, 0.8)
+        return True
+
+    def _launch_block_missile(self, unit, mount: WeaponMount, spec: Dict,
+                              target: Target, origin: Vec3, dirv: Vec3,
+                              pos: Vec3, vel_mps: float) -> None:
+        """Пуск через MissileManager (блочная ракета, основной путь v13+)."""
+        from .missiles import MissileSpec
+        mspec = MissileSpec(label=str(spec.get("label", "УР")),
+                            speed=max(40.0, min(220.0, vel_mps)),
+                            damage=self._damage_for(spec),
+                            blast_radius=float(spec.get("crater_r", 3)) * 2.5 + 6.0)
+        homing = (self.world.get_unit(target.unit_id)
+                  if target.unit_id is not None else None)
+        self.missile_manager.launch(pos, (dirv[0] * vel_mps,
+                                         dirv[1] * vel_mps,
+                                         dirv[2] * vel_mps),
+                                    target, mspec, owner_id=unit.id,
+                                    owner_label=unit.spec.label,
+                                    weapon_key=mount.key or "agm",
+                                    homing_unit=homing)
+
+    def _launch_guided_missile(self, unit, mount: WeaponMount, pos: Vec3,
+                               vel: Vec3, target: Target) -> None:
+        """Fallback: легковесная GuidedMissile (менеджер недоступен /
+        use_block_missiles=False). Команды спавна уходят CRITICAL-приоритетом."""
         msl = GuidedMissile(self._next_mid, mount.key or "agm", pos, vel,
                             target, self.cfg, owner_tag=unit.tag)
         self._next_mid += 1
         self.missiles.append(msl)
-        self.missiles_launched += 1
         self._submit(msl.spawn_commands(), Priority.CRITICAL, None)
-        self._fx(unit, "minecraft:entity.firework_rocket.launch", origin, 1.2, 0.8)
-        return True
 
     def _fire_gun(self, unit, mount: WeaponMount, spec: Dict,
                   target: Optional[Target], now: float) -> bool:

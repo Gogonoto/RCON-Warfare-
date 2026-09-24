@@ -144,7 +144,13 @@ class RCONConnection:
     def connect(self) -> None:
         """Установить соединение и авторизоваться. Бросает RCONAuthError/RCONError."""
         self.close(quiet=True)
-        sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        # Регресс RCON-01: сокет-ошибки (ConnectionRefusedError и т.п.) обязаны
+        # приходить наружу как RCONError — иначе вызывающий код (Application.connect)
+        # не может отличить «сервер недоступен» от сбоя любого другого участка.
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        except OSError as exc:
+            raise RCONDisconnected(f"Сервер {self.host}:{self.port} недоступен: {exc}") from exc
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.settimeout(self.timeout)
         self._sock = sock

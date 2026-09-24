@@ -37,6 +37,19 @@ PLAYER_GUN_CONE = 35.0          # градусов от направления �
 PLAYER_GUN_DAMAGE = 18.0
 
 
+def blast_falloff(d: float, radius: float, floor: float = 0.25,
+                  slope: float = 0.75) -> float:
+    """Множитель урона от взрыва по дистанции (P1.2: единая формула).
+
+    Линейный спад `1 - (d/radius)*slope`, зажатый снизу `floor` — даже в
+    дальнем углу воронки урон остаётся ощутимым (гарантия «взрыв не бессилен»).
+    Дефолты (0.25/0.75) — исторические значения по технике; базы вызывают с
+    (0.30/0.70) — броня территории чуть устойчивее к краю зоны. Второй
+    реализации этой формулы в коде быть не должно (§4.10).
+    """
+    return max(floor, 1.0 - (d / radius) * slope)
+
+
 @dataclass
 class DamageEvent:
     target_id: int
@@ -111,7 +124,7 @@ class CombatSystem:
                           + ((unit.pos[1] - pos[1]) * 0.6) ** 2)
             if d > radius:
                 continue
-            falloff = max(0.25, 1.0 - (d / radius) * 0.75)
+            falloff = blast_falloff(d, radius)   # P1.2: единая формула
             ev = self.hit(unit, damage * falloff, source_kind, source_id)
             if ev:
                 events.append(ev)

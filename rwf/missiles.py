@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import mc
 from .combat import CombatSystem
+from .geometry import yaw_to
 from .model import BlockModel, get_blueprint
 from .rcon import CommandQueue, Priority
 from .weapons import Target, distance
@@ -85,7 +86,7 @@ class MissileUnit:
     @property
     def yaw(self) -> float:
         dx, _dy, dz = self.dir
-        return math.degrees(math.atan2(-dx, dz)) % 360.0
+        return yaw_to(dx, dz)   # P1.1: единая формула в geometry.py
 
     @property
     def pitch(self) -> float:
