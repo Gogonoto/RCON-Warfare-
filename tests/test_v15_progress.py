@@ -7,6 +7,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from rwf.presets import (Preset, PresetLibrary, default_presets,
                          ensure_seeded, sanitize_name)
@@ -132,6 +133,55 @@ class TestPresets(unittest.TestCase):
         self.lib.save(Preset("a", "attacker"))
         self.lib.save(Preset("b", "fighter"))
         self.assertEqual(self.lib.by_variant("fighter"), ["b"])
+
+    def test_warm_catalog_does_not_touch_disk(self):
+        """Регресс FPS-03: `by_variant` вызывается из проекции КАЖДЫЙ кадр.
+
+        До кэша это было 9 чтений файлов на кадр. На медленной ФС (сетевой
+        диск / антивирус на каждый доступ) замер дал 375 мс на кадр и 2.4 fps
+        при цели 40+. Тёплый каталог обязан отдавать данные без файлового I/O.
+        """
+        self.lib.save(Preset("a", "attacker"))
+        self.lib.save(Preset("b", "fighter"))
+        self.assertEqual(self.lib.by_variant("attacker"), ["a"])   # прогрев
+        with mock.patch.object(Path, "read_text",
+                               side_effect=AssertionError("чтение диска")):
+            self.assertEqual(self.lib.by_variant("attacker"), ["a"])
+            self.assertEqual(self.lib.by_variant("fighter"), ["b"])
+            self.assertEqual(self.lib.names(), ["a", "b"])
+            self.assertEqual([p.name for p in self.lib.all()], ["a", "b"])
+
+    def test_save_invalidates_cache(self):
+        """Регресс FPS-03: кэш не должен прятать только что сохранённый пресет."""
+        self.lib.save(Preset("a", "attacker"))
+        self.assertEqual(self.lib.names(), ["a"])       # прогрев кэша
+        self.lib.save(Preset("b", "fighter"))
+        self.assertEqual(self.lib.names(), ["a", "b"])
+        self.assertTrue(self.lib.delete("a"))
+        self.assertEqual(self.lib.names(), ["b"])
+
+    def test_load_returns_copy_not_cached_object(self):
+        """Регресс FPS-03: редактор пресетов правит объект — кэш не портится."""
+        self.lib.save(Preset("a", "attacker"))
+        self.assertEqual(self.lib.by_variant("attacker"), ["a"])
+        edited = self.lib.load("a")
+        edited.variant = "fighter"
+        edited.loadout[0] = "s8"
+        self.assertEqual(self.lib.load("a").variant, "attacker")
+        self.assertEqual(self.lib.load("a").loadout, {})
+        self.assertEqual(self.lib.by_variant("attacker"), ["a"])
+
+    def test_reload_picks_up_external_edits(self):
+        """Контракт кэша: правки в обход класса видны только после reload()."""
+        self.lib.save(Preset("a", "attacker"))
+        self.assertEqual(self.lib.names(), ["a"])
+        self.lib.path_for("external").write_text(
+            '{"format": "rwf.preset", "version": 1, "name": "external",'
+            ' "variant": "fighter"}', encoding="utf-8")
+        self.assertEqual(self.lib.names(), ["a"], "кэш держит снимок каталога")
+        self.lib.reload()
+        self.assertEqual(self.lib.names(), ["a", "external"])
+        self.assertEqual(self.lib.by_variant("fighter"), ["external"])
 
     def test_sanitize_blocks_traversal(self):
         self.assertNotIn("..", sanitize_name("../../etc/passwd"))

@@ -290,6 +290,9 @@
 # [ ] render_map() clears with children_only=True and the pen is created once.
 # [ ] Hit-test uses the SAME w2s as the renderer (no drift).
 # [ ] Heavy parsing/pathfinding/terrain is in workers or precomputed, not per frame.
+# [ ] The projector touches NO filesystem: catalog/config lookups per frame come
+#     from an in-memory cache owned by the data's owner (a glob/read per frame is
+#     invisible on a fast SSD and fatal on a slow/networked one).
 # [ ] Queues are drained every frame; OUT_Q writer joined on shutdown.
 # [ ] Visually confirmed in the live window: panels laid out, map zones/routes/
 #     markers correct, telemetry ticks, log scrolls, no overlap/clipping.
@@ -317,5 +320,29 @@
 # V4. If a needed high-level map op is missing from the Sec 5 facade, ADD it to
 #     the facade (and STATE) — never bypass it with a raw draw_* elsewhere. The
 #     facade's completeness is part of the contract.
+# V5. WINDOW GEOMETRY: dpg.get_item_rect_min()/get_item_rect_max() WORK for
+#     drawlist items (the map pen, Sec 5) but RAISE KeyError('rect_min') for
+#     WINDOWS (mvWindowAppItem) — ALWAYS, not only before the first frame.
+#     Verified on DPG 2.3.1: a window's rect_* state is never populated, so a
+#     hit-test built on it silently reports "outside" forever (a right-click
+#     menu then never recognises a click inside itself, and any try/except that
+#     returns False masks the bug as "working"). For windows use
+#     get_item_pos(tag) + get_item_rect_size(tag); is_item_hovered(tag) works
+#     too and is the simplest option when the caller does not pass coordinates.
+#     Keep rect_min/rect_max only for drawlist items.
+# V6. ITEM CRASHES ARE NOT ALWAYS CATCHABLE: some Dear PyGui misuses abort in
+#     the native layer (e.g. add_tooltip on a container/table/window) and no
+#     try/except will save the process. Keep such tags on a denylist and check
+#     the item type BEFORE attaching (see build._TIP_UNSAFE in the project).
+# V7. MINIMUM WINDOW WIDTH IS 100 px AND THE FAILURE IS SILENT. Measured on DPG
+#     2.3.1: requesting width 20/34/60/80/99 all yield 100 (both the reported
+#     configuration and the real rect); 101+ are honoured exactly. Height is not
+#     clamped. configure_item(width=...), set_item_width() and autosize=False do
+#     not change this. Consequence in a real project: layout math reserved 34 px
+#     for an icon rail, the rail rendered 100 px and overlapped the panel next to
+#     it by 60 px for months without anyone noticing from the code. RULE: never
+#     compute another item's position from an assumed width of a rail/strip
+#     window -- MEASURE it (get_item_rect_size after a frame) or make the strip
+#     part of the neighbouring window.
 # =============================================================================
 # END OF SKILL

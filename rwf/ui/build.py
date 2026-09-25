@@ -159,6 +159,7 @@ def build_static_ui(state: Dict[str, Any], facade, map_ui: MapFacade,
     bind_state(state)
     _TOOL_STATE["facade"] = facade
     _TOOL_STATE["on_exit"] = on_exit
+    _TOOL_STATE["map_ui"] = map_ui      # UX-02: переключение инерции камеры
     _TOOL_STATE["hotbar"] = bool(state.get("hotbar", True))
     _TOOL_STATE["objpanel"] = bool(state.get("objpanel", True))
     dpg.add_texture_registry(tag=TEX_REGISTRY)
@@ -388,8 +389,142 @@ def _obj_header(text: str, icon: Optional[str] = None) -> None:
     iw.paint_raw(tag, prims)
 
 
+def _build_obj_hdr(w: int) -> None:
+    """Шапка: имя объекта + «Следить» в углу + селектор пульта."""
+    with dpg.group(horizontal=True, tag="obj_hdr"):
+        iw.icon_canvas("ico_obj", "obj_hdr", "gauge", 15, T.ACCENT, 1.6)
+        dpg.add_text("ОБЪЕКТ", tag="tel_title", color=T.TEXT)
+        T.bind_bold("tel_title")
+        dpg.add_spacer(width=6)
+        dpg.add_checkbox(label="Следить", tag="chk_follow",
+                         default_value=False, callback=_cb_follow)
+    _tip("chk_follow", "Центрировать карту на выбранном объекте")
+    dpg.add_combo(["—"], width=w - 2, tag="cmb_console_obj",
+                  default_value="—", callback=_cb_console_obj)
+    _tip("cmb_console_obj",
+         "Объект пульта: техника, игрок или база")
+
+
+def _build_obj_picture(w: int) -> None:
+    """Силуэт: размер задаёт ширину всей панели."""
+    dpg.add_drawlist(width=w - 2, height=92, tag="tel_pic")
+    dpg.add_text("—", tag="tel_pic_label", color=T.TEXT_DIM,
+                 wrap=w - 2)
+
+
+def _build_obj_params(w: int) -> None:
+    """Параметры: компактная таблица 2 колонки без лишних отступов."""
+    _obj_header("ПАРАМЕТРЫ", "sliders")
+    with dpg.table(header_row=False, borders_innerV=False,
+                   borders_innerH=False, borders_outerH=False,
+                   borders_outerV=False, row_background=True,
+                   no_pad_innerX=True, pad_outerX=False,
+                   policy=dpg.mvTable_SizingFixedFit,
+                   tag="tel_params", width=w - 2):
+        dpg.add_table_column(width_fixed=True,
+                             init_width_or_weight=104)
+        dpg.add_table_column(width_fixed=True,
+                             init_width_or_weight=w - 110)
+        for i in range(TEL_PARAM_ROWS):
+            with dpg.table_row(tag=f"telp_row_{i}"):
+                dpg.add_text("—", tag=f"telp_k_{i}", color=T.TEXT_DIM)
+                dpg.add_text("—", tag=f"telp_v_{i}")
+
+
+def _build_obj_resources(w: int) -> None:
+    """Ресурс: цифры ВЫНЕСЕНЫ из бара (читаемость на светлом фоне)."""
+    _obj_header("РЕСУРС", "droplet")
+    for key, label, color in (("fuel", "ТОПЛ", T.ACCENT),
+                              ("hull", "КОРП", T.AMBER),
+                              ("cargo", "ГРУЗ", T.CYAN)):
+        with dpg.group(horizontal=True, tag=f"bar_row_{key}"):
+            tcol(label, 34, color=T.TEXT_DIM)
+            dpg.add_progress_bar(default_value=0.0, width=BAR_W,
+                                 height=13, tag=f"bar_{key}")
+            tcol("—", max(60, w - BAR_W - 42), tag=f"txt_bar_{key}",
+                 color=color)
+        _bar_theme(f"bar_{key}", color)
+
+
+def _build_obj_mounts(w: int) -> None:
+    """Подвесы: читаемая таблица — оружие светлым, Б/К моноширинно,
+    огонь отдельной иконкой."""
+    _obj_header("ПОДВЕСЫ", "box")
+    with dpg.table(header_row=True, borders_innerV=False,
+                   borders_innerH=True, borders_outerH=False,
+                   borders_outerV=False, row_background=True,
+                   no_pad_innerX=True, pad_outerX=False,
+                   policy=dpg.mvTable_SizingFixedFit,
+                   tag="tel_mounts", width=w - 2):
+        dpg.add_table_column(label="№", width_fixed=True,
+                             init_width_or_weight=18)
+        dpg.add_table_column(label="ОРУЖИЕ", width_fixed=True,
+                             init_width_or_weight=w - 116)
+        dpg.add_table_column(label="Б/К", width_fixed=True,
+                             init_width_or_weight=52)
+        dpg.add_table_column(label="", width_fixed=True,
+                             init_width_or_weight=24)
+        for i in range(4):
+            with dpg.table_row(tag=f"telm_row_{i}"):
+                dpg.add_text(f"{i + 1}", tag=f"telm_n_{i}",
+                             color=T.TEXT_DIM)
+                dpg.add_combo(["—"], tag=f"cmb_wpn_{i}",
+                              width=w - 122, user_data=i,
+                              callback=_cb_load_weapon,
+                              default_value="—")
+                dpg.add_text("—", tag=f"txt_ammo_{i}")
+                iw.icon_canvas(f"ico_fire_{i}", f"telm_row_{i}",
+                               "zap", 14, T.RED, 1.6,
+                               callback=_cb_fire_mount, user_data=i)
+            _tip(f"cmb_wpn_{i}", "Сменить оружие на этом подвесе")
+            _tip(f"ico_fire_{i}", "Выстрел из этого подвеса")
+
+
+def _build_obj_actions(w: int, facade) -> None:
+    """Управление: сетка 3×3 без «Паузы» и ручного ТО (UX-15) + тумблер
+    режима службы."""
+    _obj_header("УПРАВЛЕНИЕ", "zap")
+    bw = (w - 8) // 3
+    with dpg.group(horizontal=True, tag="tel_actions"):
+        dpg.add_button(label="ОГОНЬ", width=bw, height=26,
+                       tag="btn_fire",
+                       callback=lambda: facade.send("fire_selected"))
+        dpg.add_button(label="Выровнять", width=bw, height=26,
+                       callback=lambda: facade.send("level"))
+        dpg.add_button(label="Снять", width=bw, height=26,
+                       callback=_cb_despawn)
+    with dpg.group(horizontal=True):
+        dpg.add_button(label="Центр", width=bw, height=24,
+                       callback=lambda: facade.center_on_selection())
+        dpg.add_button(label="Маршрут", width=bw, height=24,
+                       callback=lambda: _cb_hotbar_action(None, None,
+                                                          "assign"))
+        dpg.add_button(label="Очистить", width=bw, height=24,
+                       callback=lambda: _cb_hotbar_action(None, None,
+                                                          "clear"))
+    _tip("btn_fire", "Огонь из всех готовых подвесов по текущей цели")
+    _tip("tel_actions",
+         "Заправка, снаряжение и ТО выполняются автоматически на базе "
+         "при возврате — ручных кнопок больше нет")
+    # сегментный тумблер режима службы
+    with dpg.group(horizontal=True, tag="duty_row"):
+        dpg.add_button(label="СТОЯНКА", width=(w - 6) // 2, height=26,
+                       tag="btn_duty_park", callback=_cb_duty_park)
+        dpg.add_button(label="В БОЙ", width=(w - 6) // 2, height=26,
+                       tag="btn_duty_combat", callback=_cb_duty_combat)
+    _tip("btn_duty_park",
+         "Стоянка: автовозврат на приписную базу и автоматическое ТО "
+         "по касанию")
+    _tip("btn_duty_combat",
+         "В бой: автовзлёт со стоянки и дальше маршрут оператора или "
+         "патруль вокруг точки взлёта")
+    dpg.add_text("", tag="txt_duty_hint", color=T.TEXT_DIM, wrap=w - 2)
+
+
 def _build_object_panel(state: Dict[str, Any], facade) -> None:
-    """Компактная панель объекта в ЛЕВОЙ колонке (v15).
+    """Компактная панель объекта в ЛЕВОЙ колонке (v15). P2.6: секции
+    разнесены по суб-билдерам (_build_obj_*), порядок создания виджетов
+    и теги сохранены дословно — project.py резолвит их по имени.
 
     Жалобы заказчика, которые она закрывает:
     * «сильно уменьшить место, подогнать под размер иконки» — ширина панели
@@ -409,123 +544,12 @@ def _build_object_panel(state: Dict[str, Any], facade) -> None:
                     no_resize=True, no_scrollbar=True):
         with dpg.child_window(tag="obj_scroll", height=-1,
                               horizontal_scrollbar=False):
-            # --- шапка: имя объекта + «Следить» в углу -------------------
-            with dpg.group(horizontal=True, tag="obj_hdr"):
-                iw.icon_canvas("ico_obj", "obj_hdr", "gauge", 15, T.ACCENT, 1.6)
-                dpg.add_text("ОБЪЕКТ", tag="tel_title", color=T.TEXT)
-                T.bind_bold("tel_title")
-                dpg.add_spacer(width=6)
-                dpg.add_checkbox(label="Следить", tag="chk_follow",
-                                 default_value=False, callback=_cb_follow)
-            _tip("chk_follow", "Центрировать карту на выбранном объекте")
-            dpg.add_combo(["—"], width=w - 2, tag="cmb_console_obj",
-                          default_value="—", callback=_cb_console_obj)
-            _tip("cmb_console_obj",
-                 "Объект пульта: техника, игрок или база")
-
-            # --- силуэт: размер задаёт ширину всей панели -----------------
-            dpg.add_drawlist(width=w - 2, height=92, tag="tel_pic")
-            dpg.add_text("—", tag="tel_pic_label", color=T.TEXT_DIM,
-                         wrap=w - 2)
-
-            # --- параметры: компактная таблица 2 колонки ------------------
-            _obj_header("ПАРАМЕТРЫ", "sliders")
-            with dpg.table(header_row=False, borders_innerV=False,
-                           borders_innerH=False, borders_outerH=False,
-                           borders_outerV=False, row_background=True,
-                           no_pad_innerX=True, pad_outerX=False,
-                           policy=dpg.mvTable_SizingFixedFit,
-                           tag="tel_params", width=w - 2):
-                dpg.add_table_column(width_fixed=True,
-                                     init_width_or_weight=104)
-                dpg.add_table_column(width_fixed=True,
-                                     init_width_or_weight=w - 110)
-                for i in range(TEL_PARAM_ROWS):
-                    with dpg.table_row(tag=f"telp_row_{i}"):
-                        dpg.add_text("—", tag=f"telp_k_{i}", color=T.TEXT_DIM)
-                        dpg.add_text("—", tag=f"telp_v_{i}")
-
-            # --- ресурс: цифры ВЫНЕСЕНЫ из бара (читаемость) --------------
-            _obj_header("РЕСУРС", "droplet")
-            for key, label, color in (("fuel", "ТОПЛ", T.ACCENT),
-                                      ("hull", "КОРП", T.AMBER),
-                                      ("cargo", "ГРУЗ", T.CYAN)):
-                with dpg.group(horizontal=True, tag=f"bar_row_{key}"):
-                    tcol(label, 34, color=T.TEXT_DIM)
-                    dpg.add_progress_bar(default_value=0.0, width=BAR_W,
-                                         height=13, tag=f"bar_{key}")
-                    tcol("—", max(60, w - BAR_W - 42), tag=f"txt_bar_{key}",
-                         color=color)
-                _bar_theme(f"bar_{key}", color)
-
-            # --- подвесы ---------------------------------------------------
-            _obj_header("ПОДВЕСЫ", "box")
-            with dpg.table(header_row=True, borders_innerV=False,
-                           borders_innerH=True, borders_outerH=False,
-                           borders_outerV=False, row_background=True,
-                           no_pad_innerX=True, pad_outerX=False,
-                           policy=dpg.mvTable_SizingFixedFit,
-                           tag="tel_mounts", width=w - 2):
-                dpg.add_table_column(label="№", width_fixed=True,
-                                     init_width_or_weight=18)
-                dpg.add_table_column(label="ОРУЖИЕ", width_fixed=True,
-                                     init_width_or_weight=w - 116)
-                dpg.add_table_column(label="Б/К", width_fixed=True,
-                                     init_width_or_weight=52)
-                dpg.add_table_column(label="", width_fixed=True,
-                                     init_width_or_weight=24)
-                for i in range(4):
-                    with dpg.table_row(tag=f"telm_row_{i}"):
-                        dpg.add_text(f"{i + 1}", tag=f"telm_n_{i}",
-                                     color=T.TEXT_DIM)
-                        dpg.add_combo(["—"], tag=f"cmb_wpn_{i}",
-                                      width=w - 122, user_data=i,
-                                      callback=_cb_load_weapon,
-                                      default_value="—")
-                        dpg.add_text("—", tag=f"txt_ammo_{i}")
-                        iw.icon_canvas(f"ico_fire_{i}", f"telm_row_{i}",
-                                       "zap", 14, T.RED, 1.6,
-                                       callback=_cb_fire_mount, user_data=i)
-                    _tip(f"cmb_wpn_{i}", "Сменить оружие на этом подвесе")
-                    _tip(f"ico_fire_{i}", "Выстрел из этого подвеса")
-
-            # --- управление: сетка 3×3 без «Паузы» и ручного ТО ------------
-            _obj_header("УПРАВЛЕНИЕ", "zap")
-            bw = (w - 8) // 3
-            with dpg.group(horizontal=True, tag="tel_actions"):
-                dpg.add_button(label="ОГОНЬ", width=bw, height=26,
-                               tag="btn_fire",
-                               callback=lambda: facade.send("fire_selected"))
-                dpg.add_button(label="Выровнять", width=bw, height=26,
-                               callback=lambda: facade.send("level"))
-                dpg.add_button(label="Снять", width=bw, height=26,
-                               callback=_cb_despawn)
-            with dpg.group(horizontal=True):
-                dpg.add_button(label="Центр", width=bw, height=24,
-                               callback=lambda: facade.center_on_selection())
-                dpg.add_button(label="Маршрут", width=bw, height=24,
-                               callback=lambda: _cb_hotbar_action(None, None,
-                                                                  "assign"))
-                dpg.add_button(label="Очистить", width=bw, height=24,
-                               callback=lambda: _cb_hotbar_action(None, None,
-                                                                  "clear"))
-            _tip("btn_fire", "Огонь из всех готовых подвесов по текущей цели")
-            _tip("tel_actions",
-                 "Заправка, снаряжение и ТО выполняются автоматически на базе "
-                 "при возврате — ручных кнопок больше нет")
-            # сегментный тумблер режима службы
-            with dpg.group(horizontal=True, tag="duty_row"):
-                dpg.add_button(label="СТОЯНКА", width=(w - 6) // 2, height=26,
-                               tag="btn_duty_park", callback=_cb_duty_park)
-                dpg.add_button(label="В БОЙ", width=(w - 6) // 2, height=26,
-                               tag="btn_duty_combat", callback=_cb_duty_combat)
-            _tip("btn_duty_park",
-                 "Стоянка: автовозврат на приписную базу и автоматическое ТО "
-                 "по касанию")
-            _tip("btn_duty_combat",
-                 "В бой: автовзлёт со стоянки и дальше маршрут оператора или "
-                 "патруль вокруг точки взлёта")
-            dpg.add_text("", tag="txt_duty_hint", color=T.TEXT_DIM, wrap=w - 2)
+            _build_obj_hdr(w)
+            _build_obj_picture(w)
+            _build_obj_params(w)
+            _build_obj_resources(w)
+            _build_obj_mounts(w)
+            _build_obj_actions(w, facade)
     with dpg.window(tag="win_obj_tab", no_title_bar=True, no_move=True,
                     no_resize=True, no_scrollbar=True, show=False):
         iw.icon_canvas("ico_obj_show", "win_obj_tab", "chevron_right", 16,
@@ -1599,6 +1623,24 @@ def _dock_settings(state: Dict[str, Any], facade) -> None:
             dpg.add_checkbox(label=name, tag=f"chk_ev_{name}",
                              default_value=bool(ev.get(name, True)),
                              user_data=name, callback=_cb_sound_event)
+    # --- UX-02/UX-03: поведение интерфейса -------------------------------
+    with dpg.group(horizontal=True):
+        dpg.add_checkbox(label="Инерция карты", tag="chk_inertia",
+                         default_value=bool(facade.settings.get(
+                             "ui.inertia", True)),
+                         callback=_cb_inertia_toggle)
+    with dpg.group(horizontal=True):
+        tcol("Масштаб UI", 96, color=T.TEXT_DIM)
+        dpg.add_slider_float(tag="sld_ui_scale", width=150, min_value=T.UI_SCALE_MIN,
+                             max_value=T.UI_SCALE_MAX, format="%.2f",
+                             default_value=float(facade.settings.get(
+                                 "ui.scale", T.ui_scale())),
+                             callback=_cb_ui_scale)
+        dpg.add_button(label="100%", width=48, height=20,
+                       callback=_cb_ui_scale_reset)
+        tcol("", 44, tag="txt_ui_scale", color=T.TEXT_DIM)
+    with dpg.group(horizontal=True):
+        dpg.add_text("Ctrl+колесо — масштаб интерфейса", color=T.TEXT_DIM)
     with dpg.group(horizontal=True):
         dpg.add_button(label="Сохранить настройки", width=170, height=22,
                        callback=_cb_settings_save)
@@ -1625,6 +1667,33 @@ def _cb_volume(sender, app_data, user_data) -> None:
 def _cb_sound_event(sender, app_data, user_data) -> None:
     _TOOL_STATE["facade"].set_setting(f"sound.events.{user_data}",
                                       bool(app_data))
+
+
+def _apply_inertia(value: bool) -> None:
+    """UX-02: включить/выключить инерцию камеры (влияет сразу)."""
+    map_ui = _TOOL_STATE.get("map_ui")
+    if map_ui is not None:
+        map_ui.renderer.transform.inertia = bool(value)
+
+
+def _cb_inertia_toggle(sender, app_data, user_data) -> None:
+    val = bool(app_data)
+    _TOOL_STATE["inertia"] = val
+    _apply_inertia(val)
+    _TOOL_STATE["facade"].set_setting("ui.inertia", val)
+
+
+def _cb_ui_scale(sender, app_data, user_data) -> None:
+    """UX-03: слайдер масштаба UI; текст процента обновляется из проекции."""
+    val = T.set_ui_scale(float(app_data))
+    _TOOL_STATE["facade"].set_setting("ui.scale", round(val, 3))
+    if dpg.does_item_exist("sld_ui_scale") \
+            and abs(dpg.get_value("sld_ui_scale") - val) > 1e-4:
+        dpg.set_value("sld_ui_scale", val)   # если утёрся о границы клампа
+
+
+def _cb_ui_scale_reset(sender, app_data, user_data) -> None:
+    _cb_ui_scale(sender, 1.0, user_data)
 
 
 def _cb_settings_save(sender, app_data, user_data) -> None:

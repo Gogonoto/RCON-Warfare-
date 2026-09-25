@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import queue
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -210,8 +211,24 @@ def _drain(q: queue.Queue):
             return
 
 
-@unittest.skipUnless(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"),
-                     "нужен X-дисплей (Xvfb) для интеграционного рендера")
+def _gl_window_available() -> bool:
+    """Можно ли поднять GL-окно DPG в этой среде.
+
+    Windows и macOS окно создают сами; Linux требует X или Wayland (в CI —
+    `xvfb-run`). Раньше условие проверяло только `DISPLAY`, поэтому на
+    Windows самый ценный тест — сквозной прогон главного цикла — молча
+    пропускался. `RWF_NO_UI=1` принудительно отключает прогон там, где
+    рабочего стола нет вообще.
+    """
+    if os.environ.get("RWF_NO_UI"):
+        return False
+    if sys.platform.startswith("win") or sys.platform == "darwin":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+@unittest.skipUnless(_gl_window_available(),
+                     "нужна среда с GL-окном (на Linux — Xvfb)")
 class TestHeadlessRender(unittest.TestCase):
     def test_run_frames(self):
         from rwf.ui.app import run
@@ -224,6 +241,12 @@ class TestHeadlessRender(unittest.TestCase):
                 seen["frame_rev"] = state.get("frame_rev")
                 seen["connected"] = state["connection"]["connected"]
                 self._probe_v15(state, seen)
+            if n == 31:
+                # оператор перевёл пульт на базу ПОСЛЕ выбора юнита
+                state["console_obj"] = ("base", 42)
+            if n == 34:
+                # UI-18: выбор базы не должен откатиться на выделенный юнит
+                seen["console_after_base"] = state.get("console_obj")
 
         rc = run(cfg, headless_frames=40, autoconnect=True, on_frame=on_frame)
         self.assertEqual(rc, 0)
@@ -254,12 +277,24 @@ class TestHeadlessRender(unittest.TestCase):
         ctx.open_at(200, 200, [("Пункт 1", None), ("-", None),
                                ("Пункт 2", None)])
         seen["ctx_open"] = ctx.open
+        # DPG-11: прямоугольник меню = get_item_pos + get_item_rect_size.
+        # У окон `get_item_rect_min/max` бросают KeyError('rect_min') ВСЕГДА
+        # (не только до первого кадра) — на этом падал ПКМ-клик. Позицию окна
+        # DPG применяет на кадре, поэтому прокручиваем кадр и читаем факт.
+        dpg.render_dearpygui_frame()
+        ox, oy = dpg.get_item_pos("win_ctx")
+        seen["ctx_over_inside"] = ctx.over(ox + 5.0, oy + 5.0)
+        seen["ctx_over_outside"] = ctx.over(ox + 500.0, oy + 500.0)
         seen["empty_items"] = [i[0] for i in
                                ctx.items_for(None, None, None, 10.0, 10.0)]
         seen["unit_items"] = [i[0] for i in
                               ctx.items_for(7, None, None, 1.0, 2.0)]
         ctx.close()
         seen["ctx_closed"] = not ctx.open
+        # UI-18: выделяем юнит (пульт обязан пойти за ним — это штатное
+        # поведение). Перевод пульта на базу делается следующим кадром в
+        # on_frame, и он уже не должен откатываться.
+        state["selection"] = 1
 
     def _assert_v15(self, seen):
         self.assertTrue(all(seen["tags"].values()), seen["tags"])
@@ -280,9 +315,17 @@ class TestHeadlessRender(unittest.TestCase):
         self.assertFalse(seen["ctx_none"])
         self.assertTrue(seen["ctx_open"])
         self.assertTrue(seen["ctx_closed"])
+        # DPG-11: хит-тест меню обязан работать по факту геометрии окна
+        self.assertTrue(seen["ctx_over_inside"],
+                        "точка внутри меню не распознана (DPG-11)")
+        self.assertFalse(seen["ctx_over_outside"],
+                         "точка снаружи меню распознана как внутри (DPG-11)")
         self.assertIn("Точка маршрута сюда", seen["empty_items"])
         self.assertIn("Зона удара отсюда", seen["empty_items"])
         self.assertIn("Снять с карты", seen["unit_items"])
+        # UI-18: осознанный выбор базы в пульте не откатывается выделением
+        self.assertEqual(seen.get("console_after_base"), ("base", 42),
+                         "пульт откатился на выделенный юнит (UI-18)")
 
 if __name__ == "__main__":
     unittest.main()

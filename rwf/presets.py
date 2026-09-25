@@ -31,6 +31,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -109,10 +110,24 @@ class Preset:
 
 
 class PresetLibrary:
-    """Каталог пресетов: файлы JSON, по одному на пресет."""
+    """Каталог пресетов: файлы JSON, по одному на пресет.
+
+    Каталог кэшируется в памяти (FPS-03). Проекция UI спрашивает имена
+    пресетов КАЖДЫЙ кадр (`project._project_presets` -> `by_variant`), а
+    каталог лежит на диске: без кэша это 9 чтений файлов на кадр. На
+    медленной ФС (сетевой диск, антивирус на каждый доступ) это 375 мс на
+    кадр и 2.4 fps вместо 40+.
+
+    Владелец данных по-прежнему здесь, второй источник правды не заводится:
+    кэш инвалидируется собственными правками (`save`/`delete`) и явным
+    `reload()`. Правки каталога «снаружи», мимо этого класса, подхватываются
+    только после `reload()` — на старте сессии его делает `CoreFacade`.
+    """
 
     def __init__(self, directory: Path | str = "presets"):
         self.dir = Path(directory)
+        #: stem файла -> Preset (у кэшированных имя = stem); None — кэш пуст
+        self._cache: Optional[Dict[str, Preset]] = None
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
         except OSError:  # noqa: BLE001 - каталог может быть только для чтения
@@ -124,45 +139,82 @@ class PresetLibrary:
     def exists(self, name: str) -> bool:
         return self.path_for(name).is_file()
 
+    # ------------------------------------------------------------------ кэш
+    def reload(self) -> None:
+        """Сбросить кэш: следующий запрос перечитает каталог с диска."""
+        self._cache = None
+
+    def _entries(self) -> Dict[str, Preset]:
+        """Снимок каталога (единственное место файлового чтения каталога)."""
+        if self._cache is None:
+            self._cache = self._scan()
+        return self._cache
+
+    def _scan(self) -> Dict[str, Preset]:
+        out: Dict[str, Preset] = {}
+        for name in sorted(path.stem for path in self.dir.glob("*.json")):
+            try:
+                out[name] = self._read(name)
+            except (ValueError, OSError, KeyError):  # noqa: BLE001
+                log.exception("Пресет %s не читается — пропущен", name)
+        return out
+
+    def _read(self, name: str) -> Preset:
+        """Пресет прямо из файла, без кэша (имя = stem файла)."""
+        data = json.loads(self.path_for(name).read_text(encoding="utf-8"))
+        preset = Preset.from_dict(data)
+        preset.name = name
+        return preset
+
     def save(self, preset: Preset) -> Path:
         path = self.path_for(preset.name)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(preset.to_dict(), ensure_ascii=False,
                                   indent=2), encoding="utf-8")
         tmp.replace(path)
+        self._cache = None          # FPS-03: состав каталога изменился
         log.info("Пресет «%s» сохранён в %s", preset.name, path)
         return path
 
     def load(self, name: str) -> Preset:
-        data = json.loads(self.path_for(name).read_text(encoding="utf-8"))
-        preset = Preset.from_dict(data)
-        preset.name = name
-        return preset
+        """Пресет по имени. Возвращается КОПИЯ — кэш портить нельзя.
+
+        Редактор пресетов правит загруженный объект перед сохранением,
+        поэтому объект кэша наружу не отдаётся.
+        """
+        key = sanitize_name(name)
+        preset = self._entries().get(key)
+        if preset is None:
+            # имени нет в снимке каталога: читаем напрямую — так же, как
+            # раньше, вплоть до FileNotFoundError на несуществующем файле
+            preset = self._read(key)
+        out = copy.deepcopy(preset)
+        out.name = name
+        return out
 
     def delete(self, name: str) -> bool:
         path = self.path_for(name)
         if path.is_file():
             path.unlink()
+            self._cache = None      # FPS-03: состав каталога изменился
             return True
         return False
 
     def names(self) -> List[str]:
-        out = []
-        for path in sorted(self.dir.glob("*.json")):
-            out.append(path.stem)
-        return out
+        return sorted(self._entries())
 
     def all(self) -> List[Preset]:
-        presets = []
-        for name in self.names():
-            try:
-                presets.append(self.load(name))
-            except (ValueError, OSError, KeyError):  # noqa: BLE001
-                log.exception("Пресет %s не читается — пропущен", name)
-        return presets
+        return [copy.deepcopy(preset)
+                for _name, preset in sorted(self._entries().items())]
 
     def by_variant(self, variant: str) -> List[str]:
-        return [p.name for p in self.all() if p.variant == variant]
+        """Имена пресетов для варианта техники (без чтения файлов).
+
+        Эквивалентно `[p.name for p in self.all() if p.variant == variant]`:
+        у кэшированных пресетов имя = stem файла, как и в `all()`.
+        """
+        return [name for name, preset in sorted(self._entries().items())
+                if preset.variant == variant]
 
 
 def default_presets() -> Dict[str, Preset]:

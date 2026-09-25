@@ -29,7 +29,7 @@ from .config import AppConfig
 from .ai import BaseAI
 from .bases import (CARRIER_DECK_Y, KIND_CARRIER, SUPPLY_PER_TON,
                     BaseManager, RecoveryNode, forward_vec, right_vec)
-from .combat import CombatSystem
+from .combat import CombatSystem, blast_falloff
 from .missiles import MissileManager
 from .events import (EventBus, TOPIC_UNIT_ADDED, TOPIC_UNIT_REMOVED,
                      TOPIC_UNIT_UPDATED, TOPIC_WEAPON_FIRED)
@@ -399,19 +399,39 @@ class UnitEngine:
             self._stop.wait(max(0.0, self.tick_dt - elapsed))
 
     def tick_once(self, dt: Optional[float] = None) -> None:
-        """Один тик симуляции. Вызывается из потока движка либо из теста."""
+        """Один тик симуляции. Вызывается из потока движка либо из теста.
+
+        P2.1: метод — диспетчер пяти фаз; порядок фаз значим (см. §8 п.7
+        инвариантов и комментарии в фазах). Логику фаз не переносить сюда.
+        """
         if self._pause_all.is_set():
             return
         dt = self.tick_dt if dt is None else dt
         now = time.monotonic()
         self.stats.ticks += 1
 
+        pairs, paused = self._gather_active()
+        self._cleanup_dead_outside_tick()
+        crashed = self._tick_all_units(pairs, paused, dt, now)
+        self._step_subsystems(dt, now)
+        self._cleanup_crashed(crashed)
+        self._publish_updates(pairs)
+
+    # ------------------------------------------------------------- фазы тика
+    def _gather_active(self):
+        """Фаза 1: снимок живых юнитов под локом + множество пауз.
+
+        Копия, а не живой словарь: перебор вне блокировки, иначе гонка с
+        add/remove (World-02 того же рода).
+        """
         with self._lock:
             pairs = [(uid, u) for uid, u in self._units.items() if u.alive]
             paused = set(self._paused)
+        return pairs, paused
 
-        # Юниты, уничтоженные ВНЕ тика (урон из боя/игры), тоже надо убрать:
-        # иначе они висят в реестре и на карте мёртвыми.
+    def _cleanup_dead_outside_tick(self) -> None:
+        """Юниты, уничтоженные ВНЕ тика (урон из боя/игры), тоже надо убрать:
+        иначе они висят в реестре и на карте мёртвыми."""
         for uid in [u for u, un in self._units.items() if not un.alive]:
             unit = self._units[uid]
             self.queue.submit(mc.instant_explosion(unit.pos), Priority.CRITICAL)
@@ -429,6 +449,13 @@ class UnitEngine:
             self.bus.publish(TOPIC_UNIT_REMOVED, uid)
             self.stats.crashes += 1
 
+    def _tick_all_units(self, pairs, paused, dt: float, now: float) -> List[int]:
+        """Фаза 2: физика юнитов. Возвращает id погибших в этом тике.
+
+        Порядок внутри юнита важен: ИИ решает, КАКОЙ маршрут нужен,
+        исполнитель переводит его в целевые значения рулей, физика их
+        отрабатывает.
+        """
         crashed: List[int] = []
         for uid, unit in pairs:
             if uid in paused:
@@ -450,8 +477,6 @@ class UnitEngine:
                 except Exception:  # noqa: BLE001
                     log.exception("Юнит #%d: ошибка захода на посадку", uid)
 
-            # Порядок важен: ИИ решает, КАКОЙ маршрут нужен, исполнитель
-            # переводит его в целевые значения рулей, физика их отрабатывает.
             try:
                 self._tick_ai(uid, unit, dt)
                 executor = self._executors.get(uid)
@@ -484,7 +509,11 @@ class UnitEngine:
                     self._last_model[uid] = now
                 else:
                     self.stats.model_skipped += 1
+        return crashed
 
+    def _step_subsystems(self, dt: float, now: float) -> None:
+        """Фаза 3: оружие, ракеты, базы, следы аварий. Сбой подсистемы
+        не должен ронять тик — каждая обёрнута отдельно."""
         # --- оружие: ракеты, отложенные эффекты, урон ---
         try:
             self.weapons.update(dt)
@@ -512,7 +541,8 @@ class UnitEngine:
         except Exception:  # noqa: BLE001
             log.exception("Ошибка обновления мест аварий")
 
-        # --- погибшие: убрать модель и мир ---
+    def _cleanup_crashed(self, crashed: List[int]) -> None:
+        """Фаза 4: погибшие в этом тике — убрать модель и мир."""
         for uid in crashed:
             self.stats.crashes += 1
             unit = self.get(uid)
@@ -535,6 +565,9 @@ class UnitEngine:
             self.world.remove_unit(uid)
             self.bus.publish(TOPIC_UNIT_REMOVED, uid)
 
+    def _publish_updates(self, pairs) -> None:
+        """Фаза 5: события обновления выживших — последними, чтобы UI видел
+        уже консистентное состояние (после уборки погибших)."""
         for uid, unit in pairs:
             if unit.alive:
                 self.bus.publish(TOPIC_UNIT_UPDATED, uid)
@@ -576,7 +609,7 @@ class UnitEngine:
             d = max(0.0, base.distance_to(pos[0], pos[2]) - base.radius * 0.5)
             if d > radius:
                 continue
-            falloff = max(0.3, 1.0 - (d / radius) * 0.7)
+            falloff = blast_falloff(d, radius, floor=0.30, slope=0.70)   # P1.2: единая формула, базовые дефолты
             if base.take_damage(damage * falloff, source):
                 destroyed.append(base.id)
                 self._on_base_destroyed(base, source)

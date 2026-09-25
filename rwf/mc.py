@@ -446,7 +446,7 @@ def _json_text(text: str, color: str = "white") -> str:
 
 
 def tellraw(text: str, color: str = "gold", target: str = "@a",
-            prefix: str = "[Bomber] ") -> str:
+            prefix: str = "[RWF] ") -> str:
     return f"tellraw {target} {_json_text(prefix + text, color)}"
 
 

@@ -1,5 +1,26 @@
+# Python bytecode and cache
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Виртуальные окружения
 .venv/
-bomber.json
-*.log
+venv/
+env/
+
+# Редакторы и IDE
+.idea/
+.vscode/
+*.swp
+
+# Рантайм-данные оператора и сессии.
+# Каталоги presets/ и routes/ НЕ игнорируются: это содержимое, которое
+# оператор осознанно держит в репозитории и передаёт смене.
+rwf.json
+progress.json
+settings.json
+*.tmp
+
+# Скриншоты вне artifacts/ (артефакты отчётов лежат в artifacts/ и хранятся)
+/*.png

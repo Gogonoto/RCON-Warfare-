@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import dearpygui.dearpygui as dpg
 
 from . import painter
 from . import state as st
+from . import theme
 
 log = logging.getLogger(__name__)
 
@@ -101,10 +103,32 @@ class MapFacade:
         self.w = 100.0
         self.h = 100.0
         self._tex_size: Optional[Tuple[int, int]] = None
+        self._tex_np = None            # буфер float32 текстуры (для частичных обновлений)
         self._press: Optional[Tuple[float, float]] = None
         self._last_mouse: Optional[Tuple[float, float]] = None
         self._planner_drag: Optional[int] = None
+        #: кэш примитивов слоёв-подложек (сетка/базы/зоны/маршруты/маркеры):
+        #: пересчёт только при изменении ключа (FPS-01). Юниты/игроки/HUD —
+        #: всегда свежие.
+        self._bg_key: Optional[Tuple[Any, ...]] = None
+        self._bg_prims: List[Dict[str, Any]] = []
         self.ctx = None          # ContextMenu: ставится в app.py (UX-14)
+        #: UX-02: инерция камеры — время предыдущего кадра render()
+        self._last_render_t = time.perf_counter()
+
+    def _dragging(self) -> bool:
+        """Идёт ли ручное панорамирование/тактическая тяга.
+
+        Пока пользователь держит кнопку мыши, камера не должна «догонять»
+        цель — иначе инерция конфликтовала бы с прямым перетаскиванием.
+        """
+        if self._press is not None or self._planner_drag is not None \
+                or self.state.get("tac_drag") is not None:
+            return True
+        try:
+            return dpg.is_mouse_button_down(dpg.mvMouseButton_Left)
+        except Exception:  # noqa: BLE001 - нет контекста DPG (тесты headless)
+            return False
 
     # ------------------------------------------------------------ создание
     def create(self, parent: str, width: float, height: float) -> None:
@@ -151,6 +175,24 @@ class MapFacade:
         x1, y1 = dpg.get_item_rect_max(PEN)
         return x0 <= mx <= x1 and y0 <= my <= y1
 
+    @staticmethod
+    def _shift_down() -> bool:
+        try:
+            return (dpg.is_key_down(dpg.mvKey_Shift)
+                    or dpg.is_key_down(dpg.mvKey_LShift)
+                    or dpg.is_key_down(dpg.mvKey_RShift))
+        except Exception:  # noqa: BLE001 - нет окна/ключа: без модификатора
+            return False
+
+    @staticmethod
+    def _ctrl_down() -> bool:
+        try:
+            return (dpg.is_key_down(dpg.mvKey_Control)
+                    or dpg.is_key_down(dpg.mvKey_LControl)
+                    or dpg.is_key_down(dpg.mvKey_RControl))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _world_under_mouse(self) -> Tuple[float, float]:
         lx, ly = self._pen_pos()
         return self.renderer.transform.to_world(lx, ly)
@@ -175,16 +217,22 @@ class MapFacade:
         renderer.units_layer.icon_scale = float(layers.get("icon_scale", 1.0))
         renderer.terrain_layer_enabled = bool(layers.get("terrain", True))
         for name in ("grid", "bases", "zones", "routes", "markers", "units",
-                     "players", "planner", "hud"):
+                     "players", "planner", "tac", "hud"):
             renderer.set_layer_enabled(name, bool(layers.get(name, True)))
 
-        # --- камера: слежение за выбранным ---
+        # --- камера: инерция (UX-02) + слежение за выбранным ---
+        now = time.perf_counter()
+        dt = now - self._last_render_t
+        self._last_render_t = now
         tf.follow = False
         sel = state.get("selection")
         if state.get("follow") and sel is not None:
             u = (state["frame"].get("units") or {}).get(sel)
             if u:
                 tf.set_center(u["pos"][0], u["pos"][2], keep_follow=False)
+                tf.snap()          # слежение — без отставания камеры
+        elif not self._dragging():  # при ручном панорамировании не дёргаем
+            tf.tick(min(dt, 0.1))
 
         # --- черновик планировщика -> слой карты ---
         renderer.planner.points = [
@@ -192,13 +240,46 @@ class MapFacade:
             for p in state["planner"]["points"]
         ]
 
+        # --- тактические черновики (TAC-01): слои TacLayer читает из STATE ---
+        tac = renderer.tac
+        tac.routes = state["unit_routes"]
+        tac.targets = state["tac_targets"]
+        tac.selected = list(state.get("selected_units") or [])
+        drag = state.get("tac_drag")
+        tac.drag = dict(drag) if drag else None
+
         snap = dict(state["frame"])
+        tac.units = snap.get("units") or {}
+        if drag:
+            mouse = state["mouse"]
+            tac.drag["cursor"] = (mouse.get("wx", 0.0), mouse.get("wz", 0.0))
         snap["bases"] = state["bases"]
         snap["selection"] = state.get("selection")
         snap["selected_base"] = state.get("selected_base")
         # первый угол зоны удара (инструмент «strike») — только в STATE,
         # рисуем его здесь же, не плодя draw_* по другим модулям
-        prims = renderer.render(snap, None)
+        # --- FPS-01: фон (сетка/базы/зоны/маршруты/маркеры) пересчитывается
+        # только когда изменился камера или содержимое этих слоёв.
+        tfk = (round(tf.center[0], 2), round(tf.center[1], 2),
+               round(tf.scale, 4), self.w, self.h)
+        bg_key = (tfk,
+                  tuple(sorted((n, bool(layers.get(n, True)))
+                               for n in ("grid", "bases", "zones", "routes",
+                                         "markers"))),
+                  snap.get("revision"),
+                  # bases/маршруты живут в отдельных сообщениях без revision —
+                  # берём дешёвые подписи, иначе кэш устарел бы намертво
+                  tuple((b["id"], round(b["x"], 1), round(b["z"], 1),
+                         round(b.get("heading", 0.0), 1))
+                        for b in snap["bases"]),
+                  {uid: (len(r.get("waypoints") or []),
+                         r.get("active_index"), r.get("status"))
+                   for uid, r in (snap.get("routes") or {}).items()},
+                  len(snap.get("markers") or []))
+        if bg_key != self._bg_key:
+            self._bg_key = bg_key
+            self._bg_prims = renderer.render_bg(snap)
+        prims = self._bg_prims + renderer.render_fg(snap)
         corner = state.get("strike_corner")
         if corner is not None:
             sx, sy = tf.to_screen(corner[0], corner[1])
@@ -225,16 +306,44 @@ class MapFacade:
             if self._tex_size is not None and dpg.does_item_exist(TEX):
                 dpg.delete_item(TEX)
             self._tex_size = None
+            self._tex_np = None
             return
         w, h = int(t["w"]), int(t["h"])
+        try:
+            import numpy as np
+            arr = np.frombuffer(data, dtype=np.float32).reshape(-1)
+        except ImportError:  # pragma: no cover
+            arr = None
         if self._tex_size != (w, h):
             if dpg.does_item_exist(TEX):
                 dpg.delete_item(TEX)
-            dpg.add_raw_texture(w, h, data, format=dpg.mvFormat_Float_rgb,
+            payload = arr.copy() if arr is not None else data
+            dpg.add_raw_texture(w, h, payload, format=dpg.mvFormat_Float_rgb,
                                 parent=TEX_REGISTRY, tag=TEX)
             self._tex_size = (w, h)
+            self._tex_np = arr
+        elif arr is not None and self._tex_np is not None \
+                and self._tex_np.size == arr.size:
+            # Инкрементальное обновление: пишем изменённые блоки прямо в
+            # буфер существующей float-текстуры (set_value на весь массив
+            # при каждом скан-пакете стоил кадрового времени — FPS-01).
+            changed = t.get("changed") or []
+            dirty_any = False
+            for rect in changed:
+                cx0, cz0, cx1, cz1 = rect
+                i0 = max(0, int(cx0)); i1 = min(w - 1, int(cx1))
+                j0 = max(0, int(cz0)); j1 = min(h - 1, int(cz1))
+                if i1 < i0 or j1 < j0:
+                    continue
+                flat = self._tex_np.reshape(h, w, 3)
+                flat[j0:j1 + 1, i0:i1 + 1, :] = arr.reshape(h, w, 3)[j0:j1 + 1, i0:i1 + 1, :]
+                dirty_any = True
+            if not dirty_any:
+                self._tex_np[:] = arr
+            dpg.set_value(TEX, self._tex_np)
         else:
-            dpg.set_value(TEX, data)
+            dpg.set_value(TEX, arr if arr is not None else data)
+            self._tex_np = arr
 
     def _draw_terrain(self) -> None:
         t = self.state["terrain"]
@@ -261,6 +370,16 @@ class MapFacade:
         wx, wz = self.renderer.transform.to_world(lx, ly)
         mouse = self.state["mouse"]
         mouse.update(wx=wx, wz=wz, sx=lx, sy=ly, inside=True)
+        drag = self.state.get("tac_drag")
+        if drag is not None and \
+                dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
+            # активное тактическое перетаскивание (TAC-01, п.17 ТЗ)
+            if drag["kind"] == "unit":
+                st.tac_move_point(self.state, drag["uid"], 0, wx, wz)
+            else:
+                st.tac_move_point(self.state, drag["uid"], drag["index"],
+                                  wx, wz)
+            return
         if self._planner_drag is not None and \
                 dpg.is_mouse_button_down(dpg.mvMouseButton_Left):
             st.planner_drag(self.state, self._planner_drag, wx, wz)
@@ -275,15 +394,95 @@ class MapFacade:
         self._last_mouse = (lx, ly)
 
     def _on_press_left(self, sender, app_data, user_data) -> None:
-        self._press = self._pen_pos()
-        self._last_mouse = self._press
+        state = self.state
+        pos = self._pen_pos()
+        self._press = pos
+        self._last_mouse = pos
+        tool = state.get("tool", "select")
+        if tool == "select" and state.get("selected_units"):
+            # TAC-01: Shift+тяга от существующей точки маршрута -> новая точка
+            hit_pt = self._tac_point_hit(*pos)
+            if hit_pt is not None and self._shift_down():
+                uid, idx = hit_pt
+                pts = st.tac_unit_route(state, uid)
+                state["tac_drag"] = {"kind": "new", "uid": uid,
+                                     "index": len(pts), "from_index": idx,
+                                     "cursor": (state["mouse"]["wx"],
+                                                state["mouse"]["wz"])}
+                return
+            # TAC-01: тяга самой точки -> перестановка
+            if hit_pt is not None:
+                uid, idx = hit_pt
+                state["tac_drag"] = {"kind": "point", "uid": uid, "index": idx,
+                                     "moved": False,
+                                     "cursor": (state["mouse"]["wx"],
+                                                state["mouse"]["wz"])}
+                return
+            # TAC-01: тяга выделенного юнита -> весь маршрут едет за ним
+            uid = self._unit_hit(*pos)
+            if uid is not None and uid in (state.get("selected_units") or []):
+                state["tac_drag"] = {"kind": "unit", "uid": uid, "moved": False,
+                                     "cursor": (state["mouse"]["wx"],
+                                                state["mouse"]["wz"])}
+                return
         # захват точки планировщика под курсором — перетаскивание (UX-04)
-        self._planner_drag = self._planner_hit(*self._press)
+        self._planner_drag = self._planner_hit(*pos)
+
+    def _release_target_drop(self, drag: Dict[str, Any],
+                             sx: float, sy: float) -> bool:
+        """Окончание тактической тяги над объектом = засечь цель (п.17 ТЗ)."""
+        state = self.state
+        wx, wz = self.renderer.transform.to_world(sx, sy)
+        uid_hit = self._unit_hit(sx, sy)
+        if uid_hit is not None and uid_hit != drag.get("uid"):
+            u = (state["frame"].get("units") or {}).get(uid_hit) or {}
+            tgt = {"kind": "unit", "name": f"#{uid_hit} {u.get('label', '')}".strip(),
+                   "x": wx, "z": wz}
+        else:
+            bid = self._base_hit(sx, sy)
+            if bid is not None:
+                b = next((b for b in state["bases"] if b["id"] == bid), None)
+                tgt = ({"kind": "base", "name": b.get("name", "база"),
+                        "x": b["x"], "z": b["z"]} if b else None)
+            else:
+                pname = self._player_hit(sx, sy)
+                if pname is not None:
+                    p = (state["frame"].get("players") or {}).get(pname) or {}
+                    pos = p.get("pos") or (0, 0, 0)
+                    tgt = {"kind": "player", "name": pname,
+                           "x": pos[0], "z": pos[2]}
+                else:
+                    tgt = None
+        if tgt is None:
+            return False
+        st.tac_set_target(state, int(drag["uid"]), tgt)
+        self.facade.send("tac_apply", [int(drag["uid"])])
+        self.facade.send("log_ui",
+                         f"#{drag['uid']}: цель «{tgt['name']}» засечена, "
+                         f"тип удара — в меню цели (ПКМ)", "cyan")
+        return True
 
     def _on_release_left(self, sender, app_data, user_data) -> None:
         pos = self._pen_pos()
         press = self._press
+        state = self.state
         self._press = None
+        # --- завершение тактической тяги (TAC-01) --------------------------
+        drag = state.get("tac_drag")
+        if drag is not None:
+            state["tac_drag"] = None
+            moved = press is not None and \
+                math.hypot(pos[0] - press[0], pos[1] - press[1]) \
+                > DRAG_THRESHOLD
+            if drag["kind"] == "new":
+                wx, wz = self.renderer.transform.to_world(*pos)
+                if moved and not self._release_target_drop(drag, *pos):
+                    st.tac_add_point(state, drag["uid"], wx, wz)
+                    self.facade.send("tac_apply", [int(drag["uid"])])
+            elif drag["kind"] in ("point", "unit") and moved:
+                if not self._release_target_drop(drag, *pos):
+                    self.facade.send("tac_apply", [int(drag["uid"])])
+            return
         # клик вне открытого контекстного меню закрывает его (UX-14)
         if self.ctx is not None and self.ctx.open:
             mx, my = dpg.get_mouse_pos(local=False)
@@ -324,13 +523,18 @@ class MapFacade:
         self.ctx.open_at(mx, my, items)
 
     def _on_wheel(self, sender, app_data, user_data) -> None:
-        if not self._over_pen():
-            return
         try:
             delta = float(app_data)
         except (TypeError, ValueError):
             return
         if abs(delta) < 0.01:
+            return
+        # UX-03: Ctrl+колесо — масштаб интерфейса (шрифт/отступы), где бы
+        # курсор ни находился; без Ctrl и вне карты — ничего.
+        if self._ctrl_down():
+            theme.scale_step(delta, persist=self.facade.settings)
+            return
+        if not self._over_pen():
             return
         factor = 0.85 if delta > 0 else 1.18
         lx, ly = self._pen_pos()
@@ -346,6 +550,19 @@ class MapFacade:
             d = math.hypot(px - sx, py - sy)
             if d <= best_d:
                 best, best_d = i, d
+        return best
+
+    def _tac_point_hit(self, sx: float, sy: float) -> Optional[Tuple[int, int]]:
+        """Хит-тест черновых точек маршрута (TAC-01): (uid, index) или None."""
+        tf = self.renderer.transform
+        best: Optional[Tuple[int, int]] = None
+        best_d = 12.0
+        for uid, pts in (self.state["unit_routes"] or {}).items():
+            for i, p in enumerate(pts):
+                px, py = tf.to_screen(p["x"], p["z"])
+                d = math.hypot(px - sx, py - sy)
+                if d <= best_d:
+                    best, best_d = (uid, i), d
         return best
 
     def _unit_hit(self, sx: float, sy: float) -> Optional[int]:
@@ -389,17 +606,28 @@ class MapFacade:
         tool = state.get("tool", "select")
 
         if tool == "select":
+            additive = self._shift_down() or self._ctrl_down()
             uid = self._unit_hit(sx, sy)
             if uid is not None:
-                state["selection"] = uid
-                if state.get("follow"):
-                    self.facade.follow_uid = uid
-                self.facade.send("select", uid)
+                st.tac_select(state, uid, additive=additive)
+                self.facade.send("select", state.get("selection"))
                 return
+            if additive:
+                return          # Shift+клик по земле — не сбрасывает выделение
             bid = self._base_hit(sx, sy)
             state["selected_base"] = bid
             if bid is None:
-                state["selection"] = None
+                # TAC-01 (п.17 ТЗ): клик по карте у выделенной техники =
+                # назначить/продлить маршрут; обычный клик по пустому месту
+                # снимает выделение.
+                sel_units = list(state.get("selected_units") or [])
+                if sel_units and state.get("tac_click_routes", True):
+                    wx2, wz2 = self.renderer.transform.to_world(sx, sy)
+                    for u in sel_units:
+                        st.tac_add_point(state, u, wx2, wz2)
+                    self.facade.send("tac_apply", [int(u) for u in sel_units])
+                    return
+                st.tac_select(state, None)
                 self.facade.send("select", None)
             return
 

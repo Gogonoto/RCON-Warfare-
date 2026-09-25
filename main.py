@@ -343,8 +343,8 @@ def cmd_demo(cfg: AppConfig) -> int:
         print(f"  команд отправлено: {ps['sent']}, получено ответов: {ps['received']}, "
               f"ошибок: {ps['errors']}")
         print(ok("Тракт ядра работает без Minecraft-сервера."))
-        print(warn("Модули юнитов/маршрутов/карты и UI — следующие шаги "
-                   "(см. README.md → «План переписывания»)."))
+        print(warn("Это демо нижнего слоя (сеть, мир, скан, очередь). "
+                   "Полный стек с картой и пультом: `python main.py gui`."))
         return 0
     finally:
         pool.close()
@@ -567,7 +567,7 @@ def cmd_mission(cfg: AppConfig, seconds: float = 45.0) -> int:
         app.shutdown()
 
 
-def cmd_gui(cfg: AppConfig, no_dialog: bool = False) -> int:
+def cmd_gui(cfg: AppConfig) -> int:
     try:
         from rwf.ui import run as run_ui      # type: ignore
     except ImportError:
@@ -576,22 +576,13 @@ def cmd_gui(cfg: AppConfig, no_dialog: bool = False) -> int:
         print("Проверить его можно так:  python main.py --mock")
         print("План и статус — в README.md, список дефектов наброска — в BUGS.md.")
         return 3
-    # v14: стартовое окно настройки (Tkinter) ДО основного интерфейса (UX-15)
+    # UI-23: стартовое окно настройки (Tkinter) УДАЛЕНО. Диспетчерская — это и
+    # есть стартовый экран: подключение, пресеты и настройки живут внутри неё,
+    # поэтому отдельный диалог только добавлял шаг перед работой.
     from rwf.settings import Settings
-    from rwf.ui import dialog
     settings = Settings.load()
     if settings.load_error:
         print(warn(f"Настройки: {settings.load_error}"))
-    if not no_dialog:
-        res = dialog.ask_connection(settings)
-        if res is None:
-            print("Запуск отменён оператором.")
-            return 0
-        dialog.apply_to(settings, res)
-        cfg.rcon.host = res["host"]
-        cfg.rcon.port = res["port"]
-        cfg.rcon.password = res["password"]
-        cfg.rcon.mock = res["mock"]
     return run_ui(cfg, settings=settings)
 
 
@@ -628,8 +619,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("seconds", nargs="?", type=float, default=45.0)
     sub.add_parser("bench", help="сравнить пакетную и поштучную отправку")
     sp = sub.add_parser("gui", help="запустить диспетчерскую (Dear PyGui)")
-    sp.add_argument("--no-dialog", action="store_true",
-                    help="без стартового окна настройки (скриншоты/CI)")
     return p
 
 
@@ -664,7 +653,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"{C.BOLD}{C.CYAN}RCON Warfare v{__version__}{C.RESET} — "
           f"диспетчерская авиаударов для Minecraft")
 
-    cmd = args.command or ("demo" if cfg.rcon.mock or not args.command else "demo")
+    cmd = args.command or "gui"
     if cmd == "selftest":
         return cmd_selftest(argv)
     if cmd == "probe":
@@ -681,7 +670,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if cmd == "mission":
         return cmd_mission(cfg, args.seconds)
     if cmd == "gui":
-        return cmd_gui(cfg, no_dialog=getattr(args, "no_dialog", False))
+        return cmd_gui(cfg)
     return cmd_demo(cfg)
 
 

@@ -66,6 +66,25 @@ def project_state_to_widgets(state: Dict[str, Any], facade) -> None:
     _project_players(state, sig)
     _project_log(state, sig)
     _project_library(state, sig)
+    _project_ui_scale(sig)
+
+
+# ------------------------------------------------------------- масштаб UI
+def _project_ui_scale(sig: Dict[str, Any]) -> None:
+    """UX-03: процент масштаба в настройках. Обновляем только при изменении
+    (Ctrl+колесо меняет масштаб мимо слайдера — подпись должна догонять)."""
+    if not dpg.does_item_exist("txt_ui_scale"):
+        return
+    s = T.ui_scale()
+    txt = f"{s * 100:.0f}%"
+    if sig.get("ui_scale") == txt:
+        return
+    sig["ui_scale"] = txt
+    dpg.set_value("txt_ui_scale", txt)
+    # слайдер тоже синхронизируем (кламп на границах уже учтён в s)
+    if dpg.does_item_exist("sld_ui_scale") \
+            and abs(dpg.get_value("sld_ui_scale") - s) > 1e-4:
+        dpg.set_value("sld_ui_scale", s)
 
 
 # ------------------------------------------------------------- статус-строка
@@ -419,11 +438,19 @@ def _project_console(state: Dict[str, Any], sig: Dict[str, Any],
             dpg.set_value("cmb_console_obj",
                           cur if cur in labels else "—")
     # --- синхронизация выбора: selection -> console_obj ---------------------
+    # UI-18: синхронизируем по СМЕНЕ выделения, а не по несовпадению с текущим
+    # объектом пульта. Прежнее условие (obj != ("unit", sel)) откатывало на
+    # выделенный юнит осознанный выбор базы или игрока на КАЖДОМ кадре, из-за
+    # чего карточки базы и игрока были недостижимы, пока что-то выделено.
     obj = state.get("console_obj")
     sel = state.get("selection")
-    if sel is not None and obj != ("unit", sel):
-        obj = ("unit", sel)
-        state["console_obj"] = obj
+    if sel is None:
+        sig["sel_synced"] = None
+    elif sig.get("sel_synced") != sel:
+        sig["sel_synced"] = sel
+        if obj != ("unit", sel):
+            obj = ("unit", sel)
+            state["console_obj"] = obj
     if sig.get("console_obj") != obj and dpg.does_item_exist("cmb_console_obj"):
         sig["console_obj"] = obj
         label = next((l for l, o in items if o == obj), "—")
@@ -494,22 +521,22 @@ def _paint_pic(kind: str, silhouette: Optional[str] = None,
         dpg.set_value("tel_pic_label", label)
 
 
-def _console_unit(state: Dict[str, Any], cons: Dict[str, Any],
-                  sig: Dict[str, Any]) -> None:
+def _unit_param_rows(state: Dict[str, Any], cons: Dict[str, Any]) -> List[Tuple[str, str, Any]]:
+    """Собрать набор параметров консоли (чистая функция, без dpg).
+
+    Набор зависит от типа машины: у наземной техники нет высоты/вертикальной
+    скорости/перегрузки, у истребителя нет груза — раньше всё это выводилось
+    пустыми строками («ненужная фигня»).
+    """
     kind = str(cons.get("kind", "") or "")
     ground = bool(cons.get("ground")) or kind in ("tank", "truck", "apc")
     cargo_max = float(cons.get("cargo_max", 0.0) or 0.0)
     transport = cargo_max > 0 or kind in ("transport", "truck")
-
     _key, state_label, state_color, alarm = describe(
         cons, {"recovery": bool(cons.get("recovery")),
                "parked": bool(cons.get("parked")),
                "route": bool((state.get("route_status") or {}).get("name")),
                "ai": (state.get("ai_status") or {}).get("ai")})
-
-    # Набор параметров зависит от типа машины: у наземной техники нет
-    # высоты/вертикальной скорости/перегрузки, у истребителя нет груза —
-    # раньше всё это выводилось пустыми строками («ненужная фигня»).
     rows: List[Tuple[str, str, Any]] = [
         ("СОСТОЯНИЕ", state_label, state_color),
         ("СКОРОСТЬ", f"{cons.get('speed', 0):.1f} м/с", None),
@@ -538,23 +565,21 @@ def _console_unit(state: Dict[str, Any], cons: Dict[str, Any],
     nb = cons.get("nearest_base")
     rows.append(("БАЗА", (f"{nb['name']} · {nb['distance']:.0f} м" if nb
                           else "—"), None))
+    return rows
 
-    for i in range(B.TEL_PARAM_ROWS):
-        if i < len(rows):
-            _set_param(i, rows[i][0], rows[i][1], rows[i][2])
-        else:
-            _set_param(i, "", "")
-    label = f"#{cons.get('id')} {cons.get('label', '')}"
+
+def _set_title(label: str) -> None:
+    """Заголовок консоли и подпись селектора объектов."""
     if dpg.does_item_exist("tel_title"):
         dpg.set_value("tel_title", label)
     if dpg.does_item_exist("cmb_console_obj"):
         dpg.configure_item("cmb_console_obj",
                            label=label if label else "объект")
-    _paint_duty(cons.get("duty", "combat"), bool(cons.get("parked")),
-                cons.get("fuel_pct", 100.0))
-    _paint_pic(cons.get("kind", ""), cons.get("kind", ""),
-               f"{cons.get('label', '')} · {cons.get('kind', '')} · "
-               f"{cons.get('blueprint', '')}")
+
+
+def _paint_unit_bars(cons: Dict[str, Any]) -> None:
+    """Полоски ресурсов: топливо / корпус / груз (груз — только транспорту)."""
+    cargo_max = float(cons.get("cargo_max", 0.0) or 0.0)
     _bar("bar_fuel", float(cons.get("fuel_pct", 0.0)) / 100.0,
          f"{cons.get('fuel', 0):.0f} ({cons.get('fuel_pct', 0):.0f}%)", True)
     _bar("bar_hull", float(cons.get("health_pct", 100.0)) / 100.0,
@@ -565,6 +590,27 @@ def _console_unit(state: Dict[str, Any], cons: Dict[str, Any],
              f"{cons.get('cargo', 0.0):.1f} т", True)
     else:
         _bar("bar_cargo", 0.0, "—", False)
+
+
+def _console_unit(state: Dict[str, Any], cons: Dict[str, Any],
+                  sig: Dict[str, Any]) -> None:
+    """Консоль юнита: параметры + заголовок + ресурсы + подвеска (P2.5:
+    разбор на чистый сборщик строк и two paint-хелпера; порядок вызовов
+    и содержимое сохранены дословно)."""
+    rows = _unit_param_rows(state, cons)
+    for i in range(B.TEL_PARAM_ROWS):
+        if i < len(rows):
+            _set_param(i, rows[i][0], rows[i][1], rows[i][2])
+        else:
+            _set_param(i, "", "")
+    label = f"#{cons.get('id')} {cons.get('label', '')}"
+    _set_title(label)
+    _paint_duty(cons.get("duty", "combat"), bool(cons.get("parked")),
+                cons.get("fuel_pct", 100.0))
+    _paint_pic(cons.get("kind", ""), cons.get("kind", ""),
+               f"{cons.get('label', '')} · {cons.get('kind', '')} · "
+               f"{cons.get('blueprint', '')}")
+    _paint_unit_bars(cons)
     _project_mounts(state, cons, sig)
     for tag in ("tel_actions", "tel_mounts", "duty_row"):
         if dpg.does_item_exist(tag):

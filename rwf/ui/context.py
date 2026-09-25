@@ -19,7 +19,7 @@ from . import state as st
 from . import theme as T
 
 CTX_W = 208
-CTX_ITEMS = 14
+CTX_ITEMS = 20
 
 Item = Tuple[str, Optional[Callable[[], None]]]
 
@@ -67,11 +67,21 @@ class ContextMenu:
             dpg.configure_item("win_ctx", show=False)
 
     def over(self, mx: float, my: float) -> bool:
-        if not self.open:
+        """True если точка внутри окна меню. Безопасно до первой отрисовки.
+
+        DPG-11: у окон `get_item_rect_min/max` бросают `KeyError('rect_min')`
+        ВСЕГДА — не только до первого кадра (проверено на 2.3.1: у drawlist
+        ключ есть, у mvWindowAppItem его нет никогда). Прямоугольник берём из
+        `get_item_pos` + `get_item_rect_size`; они работают и до отрисовки.
+        """
+        if not self.open or not dpg.does_item_exist("win_ctx"):
             return False
-        x0, y0 = dpg.get_item_rect_min("win_ctx")
-        x1, y1 = dpg.get_item_rect_max("win_ctx")
-        return x0 <= mx <= x1 and y0 <= my <= y1
+        try:
+            x0, y0 = dpg.get_item_pos("win_ctx")
+            w, h = dpg.get_item_rect_size("win_ctx")
+        except Exception:  # noqa: BLE001 - состояние окна ещё не готово
+            return False
+        return x0 <= mx <= x0 + w and y0 <= my <= y0 + h
 
     # -------------------------------------------------------------- открытие
     def open_at(self, sx: float, sy: float, items: List[Item]) -> None:
@@ -108,7 +118,8 @@ class ContextMenu:
 
     # ------------------------------------------------------------- наполнение
     def items_for(self, uid: Optional[int], base_id: Optional[int],
-                  player: Optional[str], wx: float, wz: float) -> List[Item]:
+                  player: Optional[str], wx: float, wz: float,
+                  target: Optional[Dict[str, Any]] = None) -> List[Item]:
         state, facade = self.state, self.facade
         items: List[Item] = []
         if uid is not None:
@@ -134,6 +145,23 @@ class ContextMenu:
                 ("Снять с карты",
                  lambda: facade.send("despawn", uid, False)),
             ]
+            # TAC-01 (п.17 ТЗ): тип удара по засечённой цели — прямо из
+            # контекстного меню юнита; смена немедленно переназначает маршрут.
+            tgt = target or (state.get("tac_targets") or {}).get(int(uid))
+            if tgt:
+                items.append(("-", None))
+                tname = str(tgt.get("name") or tgt.get("kind") or "цель")
+                for strike, label in (("auto", "Авто"),
+                                      ("missile", "Ракета"),
+                                      ("bomb", "Бомбы"),
+                                      ("strafe", "Обстрел"),
+                                      ("kamikaze", "Камикадзе"),
+                                      ("navigate", "Просто долететь")):
+                    items.append((f"Удар по «{tname}»: {label}",
+                                  lambda s=strike, u=uid:
+                                  facade.send("tac_set_strike", u, s)))
+                items.append(("Снять цель",
+                              lambda: facade.send("tac_clear_target", uid)))
         elif base_id is not None:
             base = next((b for b in state.get("bases") or []
                          if b["id"] == base_id), None)

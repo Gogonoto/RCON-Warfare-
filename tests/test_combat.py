@@ -308,13 +308,37 @@ class TestBlockMissiles(unittest.TestCase):
                          "пуск УР должен создавать блочную ракету")
 
     def test_weapon_fire_fallback_without_manager(self):
+        """P2.3: fallback-путь (без MissileManager) создаёт GuidedMissile и
+        списывает ровно 1 ракету с подвески. Инвариант WPN-08: consume(1) —
+        единственный источник списания; ни один путь пуска не имеет права
+        трогать mount.ammo повторно (двойной расход)."""
         cfg = CombatConfig(use_block_missiles=True)
         ws = WeaponSystem(cfg, self.queue, self.world)   # missiles=None
         unit = build_unit("fighter", "f", pos=(0.0, 150.0, 0.0))
         mount = next(m for m in unit.mounts if m.category == "missile")
         self.world.set_player("V", (0.0, 100.0, 300.0))
+        before = mount.ammo
         self.assertTrue(ws.fire(unit, mount, Target(pos=(0.0, 100.0, 300.0), name="V")))
         self.assertEqual(len(ws.missiles), 1, "без менеджера — старая УР")
+        self.assertEqual(mount.ammo, before - 1,
+                         "fallback-пуск должен списать ровно 1 ракету (регресс двойного consume)")
+        self.assertEqual(ws.ammo_spent, 1)
+        self.assertEqual(ws.missiles_launched, 1)
+
+    def test_weapon_fire_block_missile_consumes_exactly_one(self):
+        """P2.3: основной путь (через MissileManager) тоже списывает ровно 1."""
+        cfg = CombatConfig(use_block_missiles=True)
+        ws = WeaponSystem(cfg, self.queue, self.world, combat=self.combat,
+                          missiles=self.manager)
+        unit = build_unit("fighter", "f", pos=(0.0, 150.0, 0.0))
+        mount = next(m for m in unit.mounts if m.category == "missile")
+        tgt = Target(pos=(0.0, 100.0, 300.0), name="Victim")
+        self.world.set_player("Victim", (0.0, 100.0, 300.0))
+        before = mount.ammo
+        self.assertTrue(ws.fire(unit, mount, tgt))
+        self.assertEqual(mount.ammo, before - 1,
+                         "блочный пуск должен списать ровно 1 ракету")
+        self.assertEqual(ws.ammo_spent, 1)
 
 
 class TestEngineIntegration(unittest.TestCase):

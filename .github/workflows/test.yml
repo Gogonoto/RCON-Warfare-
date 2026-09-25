@@ -1,0 +1,21 @@
+name: tests
+on:
+  push: {}
+  pull_request: {}
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        # Dear PyGui требует OpenGL-контекст — прогон UI-тестов под Xvfb
+        run: |
+          sudo apt-get update && sudo apt-get install -y xvfb libgl1 libxkbcommon-x11-0
+          pip install --quiet pytest dearpygui
+      - name: Unit + integration (headless)
+        run: python -m pytest tests/ -q -p no:libtmux --deselect tests/test_ui_dpg.py
+      - name: DPG UI tests under Xvfb
+        run: xvfb-run -a python -m pytest tests/test_ui_dpg.py -q -p no:libtmux

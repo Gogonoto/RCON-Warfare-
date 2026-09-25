@@ -14,6 +14,20 @@ from typing import Any, Dict, List, Optional, Tuple, get_type_hints
 
 DEFAULT_CONFIG_PATH = Path("rwf.json")
 
+#: Канонический префикс переменных окружения (RCON Warfare)
+ENV_PREFIX = "RWF"
+#: Прежнее имя проекта: принимается как устаревший псевдоним
+LEGACY_ENV_PREFIX = "BOMBER"
+
+
+def env_value(name: str) -> Optional[str]:
+    """Значение переменной окружения; `RWF_*` важнее устаревшего `BOMBER_*`."""
+    for prefix in (ENV_PREFIX, LEGACY_ENV_PREFIX):
+        value = os.environ.get(f"{prefix}_{name}")
+        if value:
+            return value
+    return None
+
 TICK_RATES: Tuple[float, ...] = (0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1.0)
 DEFAULT_TICK = 0.25
 
@@ -139,6 +153,8 @@ class UIConfig:
     silent_chat: bool = False          # не писать tellraw в игровой чат
     hotkeys_wasd: bool = True
     confirm_destructive: bool = True   # спрашивать перед fill/kill
+    inertia: bool = True               # UX-02: инерция камеры карты
+    ui_scale: float = 1.0              # UX-03: масштаб UI (Ctrl+колесо)
 
 
 @dataclass
@@ -155,7 +171,7 @@ class AppConfig:
     # --------------------------------------------------------------- файл
     @classmethod
     def load(cls, path: Optional[Path | str] = None) -> "AppConfig":
-        p = Path(path or os.environ.get("BOMBER_CONFIG") or DEFAULT_CONFIG_PATH)
+        p = Path(path or env_value("CONFIG") or DEFAULT_CONFIG_PATH)
         cfg = cls()
         if p.exists():
             try:
@@ -190,22 +206,33 @@ class AppConfig:
 
     # ---------------------------------------------------------- окружение
     def _apply_env(self) -> None:
-        """BOMBER_HOST / BOMBER_PORT / BOMBER_PASSWORD / BOMBER_MOCK."""
-        env = os.environ
-        if env.get("BOMBER_HOST"):
-            self.rcon.host = env["BOMBER_HOST"]
-        if env.get("BOMBER_PORT"):
+        """Переменные окружения переопределяют файл настроек.
+
+        Канонический префикс — ``RWF_`` (RCON Warfare): ``RWF_HOST``,
+        ``RWF_PORT``, ``RWF_PASSWORD``, ``RWF_MOCK``, ``RWF_TICK``,
+        ``RWF_CONFIG``. Устаревший ``BOMBER_`` (прежнее имя проекта)
+        принимается как псевдоним, чтобы скрипты и юниты прошлых версий
+        продолжали работать.
+        """
+        host = env_value("HOST")
+        if host:
+            self.rcon.host = host
+        port = env_value("PORT")
+        if port:
             try:
-                self.rcon.port = int(env["BOMBER_PORT"])
+                self.rcon.port = int(port)
             except ValueError:
                 pass
-        if env.get("BOMBER_PASSWORD"):
-            self.rcon.password = env["BOMBER_PASSWORD"]
-        if env.get("BOMBER_MOCK"):
-            self.rcon.mock = env["BOMBER_MOCK"].lower() in ("1", "true", "yes", "on")
-        if env.get("BOMBER_TICK"):
+        password = env_value("PASSWORD")
+        if password:
+            self.rcon.password = password
+        mock = env_value("MOCK")
+        if mock:
+            self.rcon.mock = mock.lower() in ("1", "true", "yes", "on")
+        tick = env_value("TICK")
+        if tick:
             try:
-                self.sim.tick = float(env["BOMBER_TICK"])
+                self.sim.tick = float(tick)
             except ValueError:
                 pass
 

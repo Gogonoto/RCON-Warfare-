@@ -1,0 +1,5 @@
+circle(dash=True,fill=None,outline=(223, 233, 255, 85),r=4.76,width=1.0,x=107.84,y=78.29)
+circle(dash=True,fill=None,outline=(223, 233, 255, 85),r=4.76,width=1.0,x=118.29,y=92.16)
+circle(dash=True,fill=None,outline=(223, 233, 255, 85),r=4.76,width=1.0,x=121.71,y=67.84)
+circle(dash=True,fill=None,outline=(223, 233, 255, 85),r=4.76,width=1.0,x=132.16,y=81.71)
+poly(closed=True,fill=(143, 183, 255, 170),outline=(223, 233, 255, 170),points=[(119.39, 84.31), (124.31, 80.61), (120.61, 75.69), (115.69, 79.39)],width=1.0)

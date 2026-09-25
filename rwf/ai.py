@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .config import AppConfig
+# П1.1: углы/векторы — только из geometry.py (единственный источник правды).
+from .geometry import angle_diff, forward_vec, right_vec, yaw_to  # noqa: F401
 from .routes import Action, Route, Waypoint
 from .weapons import Target, distance, solve_lead, speed_mps
 from .world import World

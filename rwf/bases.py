@@ -90,27 +90,11 @@ BASE_SUPPLY = {KIND_AIRPORT: 420.0, KIND_CARRIER: 300.0,
 BASE_REGEN = {KIND_AIRPORT: 2.2, KIND_CARRIER: 0.0, KIND_GROUND: 1.6}
 
 
-def forward_vec(heading_deg: float) -> Vec2:
-    """Вектор «вперёд» для yaw Minecraft: 0 = +Z, 90 = −X."""
-    h = math.radians(heading_deg)
-    return (-math.sin(h), math.cos(h))
-
-
-def right_vec(heading_deg: float) -> Vec2:
-    """Вектор «вправо» для yaw Minecraft."""
-    h = math.radians(heading_deg)
-    return (math.cos(h), math.sin(h))
-
-
-def yaw_to(dx: float, dz: float) -> float:
-    """Yaw Minecraft, соответствующий направлению (dx, dz)."""
-    return math.degrees(math.atan2(-dx, dz)) % 360.0
-
-
-def angle_diff(target: float, current: float) -> float:
-    """Кратчайшая разница курсов в градусах, [-180, 180]."""
-    d = (target - current + 180.0) % 360.0 - 180.0
-    return d
+# Единый источник правды для углов/векторов — geometry.py (P1.1, §4.10).
+# Реэкспорт СТРОГО обязателен: test_carrier.py и engine.py импортируют эти
+# имена из rwf.bases; удалять строку нельзя даже при «зачистке импортов».
+from .geometry import (angle_diff, clamp, forward_vec,  # noqa: F401
+                       right_vec, yaw_to)
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +535,55 @@ class BaseManager:
     def release(self, base: Base, uid: int) -> None:
         base.release_pad(uid)
 
+    @staticmethod
+    def _paid_fraction(pay: bool, cost: float, paid: float) -> float:
+        """Доля оплаченной услуги (ECO-02): 1.0 при бесплатной/полной оплате,
+        иначе пропорция фактически списанных очков снабжения."""
+        if not pay or cost <= 0:
+            return 1.0
+        return min(1.0, paid / max(1e-6, cost))
+
+    def _service_refuel(self, base: Base, unit, costs: Dict[str, float],
+                        pay: bool) -> Optional[str]:
+        """Заправка: топливо — делимый ресурс, при дефиците дозируется
+        пропорционально оплате (§4.8: частичная услуга допустима)."""
+        need = max(0.0, unit.spec.fuel_max - unit.fuel)
+        if need <= 0:
+            return None
+        cost = costs.get("refuel", 0.0)
+        paid = base.spend(cost) if pay else 1.0
+        frac = self._paid_fraction(pay, cost, paid)
+        unit.fuel = min(unit.spec.fuel_max, unit.fuel + need * frac)
+        return "заправка" if frac > 0.99 else f"заправка {frac * 100:.0f}%"
+
+    def _service_rearm(self, base: Base, unit, costs: Dict[str, float],
+                       pay: bool) -> Optional[str]:
+        """Боезапас: неделимый ресурс — либо полностью, либо нет (§4.6:
+        «частичный» боезапас не выдаётся)."""
+        need = sum(max(0, m.ammo_max - m.ammo) for m in unit.mounts)
+        if need <= 0:
+            return None
+        cost = costs.get("rearm", 0.0)
+        if pay and not base.can_afford(cost):
+            return None
+        if pay:
+            base.spend(cost)
+        for m in unit.mounts:
+            m.reload()
+        return "боезапас"
+
+    def _service_repair(self, base: Base, unit, costs: Dict[str, float],
+                        pay: bool) -> Optional[str]:
+        """Ремонт: как топливо — дозируется пропорционально оплате."""
+        need = max(0.0, unit.max_health - unit.health)
+        if need <= 0:
+            return None
+        cost = costs.get("repair", 0.0)
+        paid = base.spend(cost) if pay else 1.0
+        frac = self._paid_fraction(pay, cost, paid)
+        unit.repair(need * frac)
+        return "ремонт" if frac > 0.99 else f"ремонт {frac * 100:.0f}%"
+
     def service_at(self, base: Base, unit, pay: bool = True) -> List[str]:
         """Обслужить юнит на базе; вернуть список выполненных услуг.
 
@@ -558,38 +591,27 @@ class BaseManager:
         хватает — услуга оказывается частично (топливо/ремонт — пропорцио-
         нально, боезапас — только при полной оплате), а база помечается как
         «дефицит». Так ресурсы становятся дефицитом, а не декорацией.
+
+        P2.4: три услуги разнесены по _service_*; формула доли оплаты —
+        в _paid_fraction. Пороги (frac > 0.99) и порядок услуг сохранены
+        дословно, поведение не менялось.
         """
         done: List[str] = []
         if base.destroyed:
             return done
         costs = base.service_cost(unit) if pay else {}
-
         if base.provides("refuel"):
-            need = max(0.0, unit.spec.fuel_max - unit.fuel)
-            if need > 0:
-                paid = base.spend(costs.get("refuel", 0.0)) if pay else 1.0
-                frac = 1.0 if not pay or costs.get("refuel", 0.0) <= 0 else \
-                    min(1.0, paid / max(1e-6, costs["refuel"]))
-                unit.fuel = min(unit.spec.fuel_max, unit.fuel + need * frac)
-                done.append("заправка" if frac > 0.99 else
-                            f"заправка {frac * 100:.0f}%")
+            r = self._service_refuel(base, unit, costs, pay)
+            if r:
+                done.append(r)
         if base.provides("rearm"):
-            need = sum(max(0, m.ammo_max - m.ammo) for m in unit.mounts)
-            if need > 0:
-                cost = costs.get("rearm", 0.0)
-                if not pay or base.can_afford(cost):
-                    base.spend(cost) if pay else None
-                    for m in unit.mounts:
-                        m.reload()
-                    done.append("боезапас")
+            r = self._service_rearm(base, unit, costs, pay)
+            if r:
+                done.append(r)
         if base.provides("repair"):
-            need = max(0.0, unit.max_health - unit.health)
-            if need > 0:
-                paid = base.spend(costs.get("repair", 0.0)) if pay else 1.0
-                frac = 1.0 if not pay or costs.get("repair", 0.0) <= 0 else \
-                    min(1.0, paid / max(1e-6, costs["repair"]))
-                unit.repair(need * frac)
-                done.append("ремонт" if frac > 0.99 else f"ремонт {frac * 100:.0f}%")
+            r = self._service_repair(base, unit, costs, pay)
+            if r:
+                done.append(r)
         return done
 
     def step(self, dt: float) -> Dict[int, float]:

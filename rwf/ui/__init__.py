@@ -21,8 +21,18 @@ from typing import Optional
 
 
 def run(cfg=None, headless_frames: int = 0,
-        screenshot: Optional[str] = None) -> int:
+        screenshot: Optional[str] = None,
+        autoconnect: Optional[bool] = None,
+        on_frame=None, settings=None) -> int:
+    """Тонкая обёртка над `app.run` с ленивым импортом Dear PyGui.
+
+    Импорт `.app` отложен намеренно: тесты ядра и `rwf.ui.facade` тянут этот
+    пакет, не имея GL-контекста. Все параметры `app.run` обязаны пробрасываться
+    (раньше `settings`/`autoconnect`/`on_frame` терялись — `main.py gui`
+    падал с TypeError, пока интерфейс не начали запускать без Tkinter-диалога).
+    """
     from ..config import AppConfig
     from .app import run as _run
     return _run(cfg or AppConfig(), headless_frames=headless_frames,
-                screenshot=screenshot)
+                screenshot=screenshot, autoconnect=autoconnect,
+                on_frame=on_frame, settings=settings)
